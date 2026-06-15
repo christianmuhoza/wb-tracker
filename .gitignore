@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+venv/
+.venv/
+
+# Environment files
+.env
+.env.local
+
+# Node
+node_modules/
+frontend/dist/
+
+# Logs
+*.log
+*.err.log
+*.out.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project specific
+backend/bidders_import_summary.json
+
+# OpenCode
+.opencode/

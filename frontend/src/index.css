@@ -1,0 +1,68 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:         #08110d;
+  --surface:    #0f1d17;
+  --surface2:   #173126;
+  --border:     #224738;
+  --border2:    #2e5e49;
+  --accent:     #35d07f;
+  --accent2:    #a7f3c2;
+  --warn:       #f59e0b;
+  --danger:     #ef4444;
+  --text:       #edf8f0;
+  --text2:      #b2cfc0;
+  --text3:      #6f9180;
+  --ifb:        #35d07f;
+  --reoi:       #7c6fff;
+  --font-head:  'Syne', sans-serif;
+  --font-body:  'DM Sans', sans-serif;
+  --font-mono:  'DM Mono', monospace;
+  --radius:     10px;
+  --radius-lg:  16px;
+  --shadow:     0 4px 24px rgba(0,0,0,0.4);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg:         #f5fbf6;
+  --surface:    #ffffff;
+  --surface2:   #ebf7ee;
+  --border:     #cfe7d6;
+  --border2:    #9dceb0;
+  --accent:     #138a4b;
+  --accent2:    #0f5f35;
+  --text:       #102117;
+  --text2:      #446454;
+  --text3:      #6b8a77;
+  --ifb:        #138a4b;
+  --reoi:       #7757cf;
+  --shadow:     0 12px 32px rgba(19, 138, 75, 0.08);
+  color-scheme: light;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+button { cursor: pointer; font-family: inherit; }
+input, select { font-family: inherit; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.notice-description b,
+.notice-description strong { color: var(--text); }
+.notice-description p { margin: 6px 0; }
+.notice-description table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
+.notice-description td, .notice-description th { padding: 6px 10px; border: 1px solid var(--border); }
+.notice-description h1,.notice-description h2,.notice-description h3,.notice-description h4,.notice-description h5 { font-size: 13px; color: var(--text); margin: 10px 0 4px; }
+.notice-description ul, .notice-description ol { padding-left: 20px; margin: 6px 0; }

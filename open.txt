@@ -1,0 +1,10 @@
+Api:       localhost:8080/docs
+front-end: Localhost:5173
+PostgreSQL: Password@123
+
+Run:
+
+front-end: npm run dev
+backend: 
+        Activate: venv\Scripts\activate
+        run: uvicorn api:app --port 8080 --host 127.0.0.1 --reload
