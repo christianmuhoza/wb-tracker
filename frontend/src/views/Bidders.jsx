@@ -137,6 +137,9 @@ function BidderExportButton({ filters, total }) {
     ['contact_email', 'Contact Email'],
     ['contact_phone', 'Contact Phone'],
     ['contact_org', 'Organisation'],
+    ['business_model', 'Business Model'],
+    ['core_products', 'Core Products'],
+    ['corporate_activities', 'Corporate Activities'],
   ]
 
   const toggleField = (field) => {
@@ -264,6 +267,10 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
   const [form, setForm] = useState({ ...bidder })
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [enriching, setEnriching] = useState(false)
+  const [enrichResult, setEnrichResult] = useState(null)
+  const [enrichingGemini, setEnrichingGemini] = useState(false)
+  const [geminiResult, setGeminiResult] = useState(null)
 
   useEffect(() => {
     setForm({ ...bidder })
@@ -303,6 +310,40 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
       window.alert('Failed to delete bidder.')
     } finally {
       setDeleting(false)
+    }
+  }
+
+  const enrichContact = async () => {
+    setEnriching(true)
+    setEnrichResult(null)
+    try {
+      const res = await fetch(`/api/bidders/${bidder.id}/enrich`, { method: 'POST' })
+      if (!res.ok) throw new Error('Enrich failed')
+      const data = await res.json()
+      setEnrichResult(data)
+      if (data.status === 'ok') onSaved()
+    } catch {
+      setEnrichResult({ status: 'error', error: 'Search request failed' })
+    } finally {
+      setEnriching(false)
+    }
+  }
+
+  const enrichGemini = async () => {
+    setEnrichingGemini(true)
+    setGeminiResult(null)
+    try {
+      const res = await fetch(`/api/bidders/${bidder.id}/enrich_gemini`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Gemini enrichment failed')
+      setGeminiResult(data)
+      if (data.status === 'ok') {
+        onSaved()
+      }
+    } catch (err) {
+      setGeminiResult({ status: 'error', error: err.message || 'Gemini request failed' })
+    } finally {
+      setEnrichingGemini(false)
     }
   }
 
@@ -395,8 +436,33 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
               <MetaField label="Contact Name" value={bidder.contact_name} />
               <MetaField label="Email" value={bidder.contact_email} />
               <MetaField label="Phone" value={bidder.contact_phone} />
+              <MetaField label="LinkedIn" value={bidder.linkedin_url} />
               <MetaField label="Organisation" value={bidder.contact_org} />
             </div>
+
+            {(bidder.business_model || bidder.core_products || bidder.corporate_activities) && (
+              <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {bidder.business_model && (
+                  <div>
+                    <div style={{ color: 'var(--text3)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>Business Model</div>
+                    <div style={{ color: 'var(--text)', fontSize: 13, lineHeight: 1.4 }}>{bidder.business_model}</div>
+                  </div>
+                )}
+                {bidder.core_products && (
+                  <div>
+                    <div style={{ color: 'var(--text3)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>Core Products & Services</div>
+                    <div style={{ color: 'var(--text)', fontSize: 13, lineHeight: 1.4 }}>{bidder.core_products}</div>
+                  </div>
+                )}
+                {bidder.corporate_activities && (
+                  <div>
+                    <div style={{ color: 'var(--text3)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>Corporate Activities</div>
+                    <div style={{ color: 'var(--text)', fontSize: 13, lineHeight: 1.4 }}>{bidder.corporate_activities}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
               <button
                 onClick={() => setEditing(true)}
@@ -410,6 +476,36 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
                 }}
               >
                 Edit Details
+              </button>
+              <button
+                onClick={enrichGemini}
+                disabled={enrichingGemini}
+                style={{
+                  background: enrichingGemini ? 'var(--surface2)' : 'rgba(124,111,255,0.1)',
+                  border: `1px solid ${enrichingGemini ? 'var(--border)' : 'var(--reoi)'}`,
+                  color: enrichingGemini ? 'var(--text3)' : 'var(--reoi)',
+                  borderRadius: 8,
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  fontWeight: 700,
+                }}
+              >
+                {enrichingGemini ? 'Analyzing...' : 'Enrich & Classify (Gemini)'}
+              </button>
+              <button
+                onClick={enrichContact}
+                disabled={enriching}
+                style={{
+                  background: enriching ? 'var(--surface2)' : 'rgba(53,208,127,0.1)',
+                  border: `1px solid ${enriching ? 'var(--border)' : 'var(--accent)'}`,
+                  color: enriching ? 'var(--text3)' : 'var(--accent)',
+                  borderRadius: 8,
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  fontWeight: 700,
+                }}
+              >
+                {enriching ? 'Searching...' : 'Search Contact'}
               </button>
               <button
                 onClick={removeBidder}
@@ -428,19 +524,71 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
                 {deleting ? 'Deleting...' : 'Delete Bidder'}
               </button>
             </div>
+            {enrichResult && (
+              <div style={{
+                marginTop: 10,
+                padding: '8px 12px',
+                borderRadius: 8,
+                fontSize: 12,
+                background: enrichResult.status === 'ok' ? 'rgba(53,208,127,0.08)' : 'rgba(239,68,68,0.08)',
+                border: `1px solid ${enrichResult.status === 'ok' ? 'var(--accent)' : 'var(--danger)'}`,
+                color: enrichResult.status === 'ok' ? 'var(--accent)' : 'var(--danger)',
+              }}>
+                {enrichResult.status === 'ok' ? (
+                  <div>
+                    <strong>Found:</strong>
+                    {enrichResult.found?.contact_email && <div>Email: {enrichResult.found.contact_email}</div>}
+                    {enrichResult.found?.contact_phone && <div>Phone: {enrichResult.found.contact_phone}</div>}
+                    {enrichResult.found?.linkedin_url && <div>LinkedIn: {enrichResult.found.linkedin_url}</div>}
+                  </div>
+                ) : enrichResult.status === 'no_results' ? (
+                  'No contact info found online'
+                ) : (
+                  `Error: ${enrichResult.error || 'Unknown error'}`
+                )}
+              </div>
+            )}
+            {geminiResult && (
+              <div style={{
+                marginTop: 10,
+                padding: '10px 14px',
+                borderRadius: 8,
+                fontSize: 12,
+                background: geminiResult.status === 'ok' ? 'rgba(124,111,255,0.08)' : 'rgba(239,68,68,0.08)',
+                border: `1px solid ${geminiResult.status === 'ok' ? 'var(--reoi)' : 'var(--danger)'}`,
+                color: geminiResult.status === 'ok' ? 'var(--text)' : 'var(--danger)',
+                lineHeight: 1.4,
+              }}>
+                {geminiResult.status === 'ok' ? (
+                  <div>
+                    <strong style={{ color: 'var(--reoi)' }}>Gemini Analysis Successful:</strong>
+                    {geminiResult.enriched?.category && <div><strong>Category:</strong> {geminiResult.enriched.category}</div>}
+                    {geminiResult.enriched?.business_model && <div><strong>Business Model:</strong> {geminiResult.enriched.business_model}</div>}
+                    {geminiResult.enriched?.core_products && <div><strong>Core Products:</strong> {geminiResult.enriched.core_products}</div>}
+                    {geminiResult.enriched?.corporate_activities && <div><strong>Corporate Activities:</strong> {geminiResult.enriched.corporate_activities}</div>}
+                    {geminiResult.enriched?.contact_email && <div><strong>Email:</strong> {geminiResult.enriched.contact_email}</div>}
+                    {geminiResult.enriched?.contact_phone && <div><strong>Phone:</strong> {geminiResult.enriched.contact_phone}</div>}
+                    {geminiResult.enriched?.linkedin_url && <div><strong>LinkedIn:</strong> {geminiResult.enriched.linkedin_url}</div>}
+                  </div>
+                ) : (
+                  `Error: ${geminiResult.error || 'Unknown error'}`
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               {[
-                ['name', 'Name'],
-                ['category', 'Category'],
-                ['country', 'Country of Origin'],
-                ['contact_name', 'Contact Name'],
-                ['contact_email', 'Email'],
-                ['contact_phone', 'Phone'],
-                ['contact_org', 'Organisation'],
-              ].map(([key, label]) => (
+                  ['name', 'Name'],
+                  ['category', 'Category'],
+                  ['country', 'Country of Origin'],
+                  ['contact_name', 'Contact Name'],
+                  ['contact_email', 'Email'],
+                  ['contact_phone', 'Phone'],
+                  ['linkedin_url', 'LinkedIn'],
+                  ['contact_org', 'Organisation'],
+                ].map(([key, label]) => (
                 <div key={key}>
                   <label style={{ display: 'block', fontSize: 11, color: 'var(--text3)', marginBottom: 3 }}>
                     {label}
@@ -456,6 +604,35 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
                       borderRadius: 8,
                       color: 'var(--text)',
                       fontSize: 13,
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+              {[
+                ['business_model', 'Business Model'],
+                ['core_products', 'Core Products'],
+                ['corporate_activities', 'Corporate Activities'],
+              ].map(([key, label]) => (
+                <div key={key}>
+                  <label style={{ display: 'block', fontSize: 11, color: 'var(--text3)', marginBottom: 3 }}>
+                    {label}
+                  </label>
+                  <textarea
+                    value={form[key] || ''}
+                    onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+                    rows={2}
+                    style={{
+                      width: '100%',
+                      padding: '7px 10px',
+                      background: 'var(--bg)',
+                      border: '1px solid var(--border2)',
+                      borderRadius: 8,
+                      color: 'var(--text)',
+                      fontSize: 13,
+                      resize: 'vertical',
+                      fontFamily: 'inherit',
                     }}
                   />
                 </div>

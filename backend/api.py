@@ -28,6 +28,8 @@ from bs4 import BeautifulSoup
 
 from db import db, q, ensure_support_tables, get_app_settings_map
 from services.tech import build_tech_notice_condition, classify_notice_tech, looks_like_tech_bidder
+from services.contact_enrichment import search_company_contact
+from services.gemini_service import classify_and_enrich_with_gemini
 from services.bidder_extraction import (
     parse_notice_bidder_details, extract_bidders_list, extract_bidders_from_description,
     extract_awarded_bidders, fetch_bidders_from_detail_page, _infer_notice_category,
@@ -1615,6 +1617,10 @@ def migrate_db():
         "UPDATE procurement_notices SET notice_status = status WHERE notice_status IS NULL",
         "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS contract_amount NUMERIC",
         "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS currency TEXT",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS linkedin_url TEXT",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS business_model TEXT",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS core_products TEXT",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS corporate_activities TEXT",
         """CREATE TABLE IF NOT EXISTS bidders (
             id SERIAL PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
@@ -1622,8 +1628,12 @@ def migrate_db():
             contact_name TEXT,
             contact_email TEXT,
             contact_phone TEXT,
+            linkedin_url TEXT,
             contact_org TEXT,
             country TEXT,
+            business_model TEXT,
+            core_products TEXT,
+            corporate_activities TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )""",
@@ -1839,6 +1849,9 @@ def list_bidders(
             b.contact_phone,
             b.contact_org,
             b.country,
+            b.business_model,
+            b.core_products,
+            b.corporate_activities,
             b.created_at,
             b.updated_at,
             COUNT(ba.id)                              AS bid_count,
@@ -1899,6 +1912,9 @@ BIDDER_EXPORT_FIELDS = {
     "contact_email": ("Contact Email", "contact_email", 30),
     "contact_phone": ("Contact Phone", "contact_phone", 20),
     "contact_org": ("Organisation", "contact_org", 30),
+    "business_model": ("Business Model", "business_model", 30),
+    "core_products": ("Core Products", "core_products", 30),
+    "corporate_activities": ("Corporate Activities", "corporate_activities", 40),
 }
 
 
@@ -1921,6 +1937,9 @@ def fetch_bidder_export_rows(search: Optional[str], qs: Optional[str], country: 
             b.contact_email,
             b.contact_phone,
             b.contact_org,
+            b.business_model,
+            b.core_products,
+            b.corporate_activities,
             COUNT(ba.id)                       AS bid_count,
             COUNT(CASE WHEN ba.won THEN 1 END) AS won_count,
             COALESCE(SUM(ba.award_amount), 0)  AS total_bid_amount,
@@ -2120,8 +2139,12 @@ class BidderUpdate(BaseModel):
     contact_name: Optional[str] = None
     contact_email: Optional[str] = None
     contact_phone: Optional[str] = None
+    linkedin_url: Optional[str] = None
     contact_org: Optional[str] = None
     country: Optional[str] = None
+    business_model: Optional[str] = None
+    core_products: Optional[str] = None
+    corporate_activities: Optional[str] = None
 
 
 @app.put("/api/bidders/{bidder_id}")
@@ -2334,6 +2357,174 @@ def import_missing_awards_by_country(
         except Exception:
             summary["errors"] += 1
     return summary
+
+
+# ── Contact Enrichment ─────────────────────────────────────────────────────────
+
+class EnrichResult(BaseModel):
+    status: str
+    bidder_id: int
+    bidder_name: str
+    found: Dict[str, Any] = {}
+    updated_fields: List[str] = []
+    error: Optional[str] = None
+
+
+@app.post("/api/bidders/{bidder_id}/enrich")
+def enrich_bidder_contact(bidder_id: int):
+    rows = q("SELECT * FROM bidders WHERE id = %s", [bidder_id])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Bidder not found")
+    bidder = rows[0]
+    company = bidder["name"]
+    country = bidder.get("country") or ""
+
+    try:
+        found = search_company_contact(company, country)
+    except Exception as e:
+        return EnrichResult(
+            status="error", bidder_id=bidder_id, bidder_name=company,
+            error=str(e)
+        ).dict()
+
+    if not found:
+        return EnrichResult(
+            status="no_results", bidder_id=bidder_id, bidder_name=company,
+            found={}, updated_fields=[]
+        ).dict()
+
+    update_fields = {}
+    for key in ("contact_email", "contact_phone", "linkedin_url"):
+        val = found.get(key)
+        if val:
+            update_fields[key] = val
+
+    if update_fields:
+        sets = ", ".join(f"{k} = %s" for k in update_fields)
+        params = list(update_fields.values()) + [bidder_id]
+        with db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE bidders SET {sets}, updated_at = NOW() WHERE id = %s", params)
+            conn.commit()
+
+    return EnrichResult(
+        status="ok", bidder_id=bidder_id, bidder_name=company,
+        found=found, updated_fields=list(update_fields.keys())
+    ).dict()
+
+
+@app.post("/api/bidders/{bidder_id}/enrich_gemini")
+def enrich_bidder_gemini(bidder_id: int):
+    # 1. Fetch bidder details
+    rows = q("SELECT * FROM bidders WHERE id = %s", [bidder_id])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Bidder not found")
+    bidder = rows[0]
+    
+    # 2. Fetch bidder notices for context
+    notices = get_bidder_notices(bidder_id)
+    
+    # 3. Call Gemini service
+    try:
+        enriched = classify_and_enrich_with_gemini(
+            company=bidder["name"],
+            country=bidder.get("country") or "",
+            bids=notices
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    # 4. Save results to DB
+    update_fields = {}
+    for key in ("category", "business_model", "core_products", "corporate_activities", "contact_email", "contact_phone", "linkedin_url"):
+        val = enriched.get(key)
+        if val is not None:
+            update_fields[key] = val
+            
+    if update_fields:
+        sets = ", ".join(f"{k} = %s" for k in update_fields)
+        params = list(update_fields.values()) + [bidder_id]
+        with db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE bidders SET {sets}, updated_at = NOW() WHERE id = %s", params)
+            conn.commit()
+            
+    return {
+        "status": "ok",
+        "bidder_id": bidder_id,
+        "bidder_name": bidder["name"],
+        "enriched": enriched,
+        "updated_fields": list(update_fields.keys())
+    }
+
+
+@app.post("/api/bidders/enrich")
+def enrich_all_bidders(
+    missing_only: bool = Query(True, description="Only enrich bidders missing contact info"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    if missing_only:
+        rows = q("""
+            SELECT id, name, country FROM bidders
+            WHERE (contact_email IS NULL OR TRIM(contact_email) = '')
+              AND (contact_phone IS NULL OR TRIM(contact_phone) = '')
+            ORDER BY updated_at ASC NULLS FIRST
+            LIMIT %s
+        """, [limit])
+    else:
+        rows = q("""
+            SELECT id, name, country FROM bidders
+            ORDER BY updated_at ASC NULLS FIRST
+            LIMIT %s
+        """, [limit])
+
+    results = []
+    for row in rows:
+        try:
+            found = search_company_contact(row["name"], row.get("country") or "")
+        except Exception as e:
+            results.append(EnrichResult(
+                status="error", bidder_id=row["id"],
+                bidder_name=row["name"], error=str(e)
+            ).dict())
+            continue
+
+        if not found:
+            results.append(EnrichResult(
+                status="no_results", bidder_id=row["id"],
+                bidder_name=row["name"]
+            ).dict())
+            continue
+
+        update_fields = {}
+        for key in ("contact_email", "contact_phone", "linkedin_url"):
+            val = found.get(key)
+            if val:
+                update_fields[key] = val
+
+        if update_fields:
+            sets = ", ".join(f"{k} = %s" for k in update_fields)
+            params = list(update_fields.values()) + [row["id"]]
+            with db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"UPDATE bidders SET {sets}, updated_at = NOW() WHERE id = %s", params)
+                conn.commit()
+
+        results.append(EnrichResult(
+            status="ok", bidder_id=row["id"],
+            bidder_name=row["name"],
+            found=found,
+            updated_fields=list(update_fields.keys())
+        ).dict())
+
+    enriched_count = sum(1 for r in results if r["status"] == "ok")
+    return {
+        "total_processed": len(results),
+        "enriched": enriched_count,
+        "results": results,
+    }
 
 
 # ── Fetch country status ──────────────────────────────────────────────────────
