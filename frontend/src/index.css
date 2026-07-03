@@ -66,3 +66,4 @@ a:hover { text-decoration: underline; }
 .notice-description td, .notice-description th { padding: 6px 10px; border: 1px solid var(--border); }
 .notice-description h1,.notice-description h2,.notice-description h3,.notice-description h4,.notice-description h5 { font-size: 13px; color: var(--text); margin: 10px 0 4px; }
 .notice-description ul, .notice-description ol { padding-left: 20px; margin: 6px 0; }
+@keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }

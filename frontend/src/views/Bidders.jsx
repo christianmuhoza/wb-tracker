@@ -3,21 +3,7 @@ import { Cpu } from 'lucide-react'
 
 const fmtDate = (d) => (d ? d.slice(0, 10) : '-')
 
-const fmtMoneyCompact = (n, currency = 'USD') => {
-  if (!n || Number(n) === 0) return '-'
-  try {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency,
-      notation: 'compact',
-      maximumFractionDigits: 1,
-    }).format(Number(n))
-  } catch {
-    return `${currency || ''} ${Number(n).toLocaleString()}`
-  }
-}
-
-const fmtMoneyFull = (n, currency = 'USD') => {
+const fmtMoney = (n, currency = 'USD') => {
   if (!n || Number(n) === 0) return '-'
   try {
     return new Intl.NumberFormat('en-US', {
@@ -26,7 +12,7 @@ const fmtMoneyFull = (n, currency = 'USD') => {
       maximumFractionDigits: 2,
     }).format(Number(n))
   } catch {
-    return `${currency || ''} ${Number(n).toLocaleString()}`
+    return `${currency || ''} ${Number(n).toLocaleString('en-US')}`
   }
 }
 
@@ -118,6 +104,7 @@ function MetaField({ label, value }) {
 function BidderExportButton({ filters, total }) {
   const [showFields, setShowFields] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState(null)
   const [exportType, setExportType] = useState('excel')
   const [selectedFields, setSelectedFields] = useState([
     'name', 'country', 'category', 'bid_count', 'won_count', 'total_bid_amount', 'primary_currency', 'last_bid_date',
@@ -170,14 +157,17 @@ function BidderExportButton({ filters, total }) {
       URL.revokeObjectURL(url)
       setShowFields(false)
     } catch {
-      window.alert('Failed to export bidders.')
+      setExportError('Failed to export bidders.')
     } finally {
       setExporting(false)
     }
   }
 
+  useEffect(() => { if (exportError) { const t = setTimeout(() => setExportError(null), 3000); return () => clearTimeout(t) } }, [exportError])
+
   return (
     <div style={{ position: 'relative' }}>
+      {exportError && <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 8, background: 'var(--danger)', color: '#fff', borderRadius: 8, padding: '8px 12px', fontSize: 12, zIndex: 10 }}>{exportError}</div>}
       <button
         onClick={() => setShowFields(current => !current)}
         disabled={total === 0 || exporting}
@@ -275,12 +265,14 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
   useEffect(() => {
     setForm({ ...bidder })
     setLoadingNotices(true)
-    fetch(`/api/bidders/${bidder.id}/notices`)
-      .then(r => r.json())
+    const controller = new AbortController()
+    fetch(`/api/bidders/${bidder.id}/notices`, { signal: controller.signal })
+      .then(r => { if (!r.ok) throw new Error('Failed to fetch notices'); return r.json() })
       .then(setNotices)
-      .catch(() => setNotices([]))
-      .finally(() => setLoadingNotices(false))
-  }, [bidder.id, bidder])
+      .catch(() => { if (!controller.signal.aborted) setNotices([]) })
+      .finally(() => { if (!controller.signal.aborted) setLoadingNotices(false) })
+    return () => controller.abort()
+  }, [bidder.id])
 
   const save = async () => {
     setSaving(true)
@@ -300,17 +292,19 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
   }
 
   const removeBidder = async () => {
-    if (!window.confirm(`Delete bidder "${bidder.name}" and all linked bid records?`)) return
-    setDeleting(true)
-    try {
-      const res = await fetch(`/api/bidders/${bidder.id}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error('Delete failed')
-      onDeleted?.()
-    } catch (error) {
-      window.alert('Failed to delete bidder.')
-    } finally {
-      setDeleting(false)
-    }
+    setConfirmDelete({ name: bidder.name, onConfirm: async () => {
+      setDeleting(true)
+      try {
+        const res = await fetch(`/api/bidders/${bidder.id}`, { method: 'DELETE' })
+        if (!res.ok) throw new Error('Delete failed')
+        onDeleted?.()
+      } catch {
+        setNotification('Failed to delete bidder.')
+      } finally {
+        setDeleting(false)
+        setConfirmDelete(null)
+      }
+    }})
   }
 
   const enrichContact = async () => {
@@ -423,7 +417,7 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
         <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
           <StatPill label="Total Bids" value={bidder.bid_count ?? notices.length} />
           <StatPill label="Won" value={bidder.won_count ?? won.length} accent="var(--accent)" />
-          <StatPill label="Total Amount" value={fmtMoneyCompact(bidder.total_bid_amount ?? totalAmount, primaryCurrency)} accent="var(--accent2)" />
+          <StatPill label="Total Amount" value={fmtMoney(bidder.total_bid_amount ?? totalAmount, primaryCurrency)} accent="var(--accent2)" />
         </div>
       </div>
 
@@ -717,7 +711,7 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
               {n.borrower_country && <span>Country: {n.borrower_country}</span>}
               {n.bid_amount ? (
                 <span style={{ color: 'var(--accent2)', fontWeight: 700 }}>
-                  Bid Amount: {fmtMoneyFull(n.bid_amount, n.bid_currency || 'USD')}
+                  Bid Amount: {fmtMoney(n.bid_amount, n.bid_currency || 'USD')}
                 </span>
               ) : null}
               {n.award_date && <span>Date: {fmtDate(n.award_date)}</span>}
@@ -757,6 +751,8 @@ export default function Bidders() {
   const [importStatus, setImportStatus] = useState(null)
   const [finishingImport, setFinishingImport] = useState(false)
   const [countryOptions, setCountryOptions] = useState([])
+  const [notification, setNotification] = useState(null)
+  const [confirmDelete, setConfirmDelete] = useState(null)
 
   const fetchBidders = useCallback(async () => {
     setLoading(true)
@@ -778,7 +774,7 @@ export default function Bidders() {
         setTotalPages(json.total_pages ?? 1)
       }
     } catch (e) {
-      console.error(e)
+      setNotification('Failed to load bidders.')
     } finally {
       setLoading(false)
     }
@@ -816,7 +812,7 @@ export default function Bidders() {
     setImporting(true)
     try {
       await fetch('/api/bidders/import_awards_all', { method: 'POST' })
-      alert('Batch import started in background. Refresh shortly to see the updated bidder details.')
+      setNotification('Batch import started in background. Refresh shortly to see the updated bidder details.')
     } finally {
       setImporting(false)
     }
@@ -824,7 +820,7 @@ export default function Bidders() {
 
   const importSelectedCountry = async (missingOnly = false) => {
     if (!country.trim()) {
-      window.alert('Enter or select a country first.')
+      setNotification('Enter or select a country first.')
       return
     }
 
@@ -843,12 +839,12 @@ export default function Bidders() {
       if (missingOnly) {
         await fetchBidders()
         await fetchImportStatus()
-        window.alert(`Missing bidder import finished for ${country}. Processed ${data.processed ?? 0} notices.`)
+        setNotification(`Missing bidder import finished for ${country}. Processed ${data.processed ?? 0} notices.`)
       } else {
-        window.alert(`Country bidder import started for ${country}. Refresh shortly to see updated bidder details.`)
+        setNotification(`Country bidder import started for ${country}. Refresh shortly to see updated bidder details.`)
       }
     } catch {
-      window.alert(`Failed to import bidders for ${country}.`)
+      setNotification(`Failed to import bidders for ${country}.`)
     } finally {
       if (missingOnly) setImportingMissingCountry(false)
       else setImportingCountry(false)
@@ -862,9 +858,9 @@ export default function Bidders() {
       if (!res.ok) throw new Error('Import missing failed')
       await fetchBidders()
       await fetchImportStatus()
-      window.alert('Missing bidder imports finished.')
+      setNotification('Missing bidder imports finished.')
     } catch {
-      window.alert('Failed to finish missing bidder imports.')
+      setNotification('Failed to finish missing bidder imports.')
     } finally {
       setFinishingImport(false)
     }
@@ -1061,7 +1057,7 @@ export default function Bidders() {
         boxShadow: 'var(--shadow)',
       }}>
         <div style={{ width: '100%', overflowX: 'auto' }}>
-        <table style={{ width: '100%', minWidth: 1060, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+        <table style={{ width: '100%', minWidth: 1060, borderCollapse: 'collapse' }}>
           <thead>
             <tr>
               {['Tech', 'Company / Bidder', 'Country of Origin', 'Category', 'Bids', 'Won', 'Total Bid Amount', 'Last Bid', ''].map(h => (
@@ -1150,7 +1146,7 @@ export default function Bidders() {
                   ) : <span style={{ color: 'var(--text3)' }}>0</span>}
                 </td>
                 <td style={{ ...tdStyle(i), fontWeight: 700, color: 'var(--accent2)', whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)' }}>
-                  {fmtMoneyCompact(b.total_bid_amount, b.primary_currency || 'USD')}
+                  {fmtMoney(b.total_bid_amount, b.primary_currency || 'USD')}
                 </td>
                 <td style={{ ...tdStyle(i), color: 'var(--text3)', fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
                   {fmtDate(b.last_bid_date)}
@@ -1206,6 +1202,29 @@ export default function Bidders() {
             onSaved={() => { fetchBidders(); setSelected(null) }}
             onDeleted={() => { fetchBidders(); setSelected(null) }}
           />
+        </>
+      )}
+
+      {notification && (
+        <>
+          <div onClick={() => setNotification(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 999 }} />
+          <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 1000, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 24, minWidth: 300, maxWidth: 450 }}>
+            <div style={{ fontSize: 14, color: 'var(--text)', marginBottom: 16 }}>{notification}</div>
+            <button onClick={() => setNotification(null)} style={{ background: 'var(--accent)', border: 'none', color: '#fff', borderRadius: 8, padding: '8px 16px', fontSize: 12, fontWeight: 600, float: 'right' }}>OK</button>
+          </div>
+        </>
+      )}
+
+      {confirmDelete && (
+        <>
+          <div onClick={() => setConfirmDelete(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 999 }} />
+          <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 1000, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 24, minWidth: 320 }}>
+            <div style={{ fontSize: 14, color: 'var(--text)', marginBottom: 16 }}>Delete bidder "{confirmDelete.name}" and all linked bid records?</div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setConfirmDelete(null)} style={{ background: 'transparent', border: '1px solid var(--border)', color: 'var(--text3)', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>Cancel</button>
+              <button onClick={confirmDelete.onConfirm} style={{ background: 'var(--danger)', border: 'none', color: '#fff', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 600 }}>Delete</button>
+            </div>
+          </div>
         </>
       )}
     </div>

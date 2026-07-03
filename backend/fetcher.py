@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 API_BASE       = "https://search.worldbank.org/api/v2/procnotices"
-ABSOLUTE_START = date(2025, 1, 1)   # Keep enough history so lower-volume countries are not excluded
+ABSOLUTE_START = date.today() - timedelta(days=730)   # Keep 2 years of history so lower-volume countries are not excluded
 ROWS_PER_PAGE  = 50
 FALLBACK_ROWS_PER_PAGE = 10
 COUNTRY_BATCH  = 5                  # Countries per API request (avoids 500s)
@@ -228,7 +228,7 @@ def get_app_settings() -> dict:
             cur.execute("""
                 INSERT INTO app_settings (key, value)
                 VALUES
-                    ('baseline_date', '2025-01-01'),
+                    ('baseline_date', (CURRENT_DATE - INTERVAL '2 years')::text),
                     ('country_batch', '5'),
                     ('request_delay', '1.2'),
                     ('auto_sync_hour', '06:00')
@@ -246,7 +246,7 @@ def get_fetch_start_date() -> date:
     otherwise fall back to last successful run minus 2 days (incremental).
     """
     settings = get_app_settings()
-    baseline = settings.get("baseline_date", "2025-01-01")
+    baseline = settings.get("baseline_date", (date.today() - timedelta(days=730)).isoformat())
     last_run_baseline = settings.get("last_run_baseline_date")
 
     try:
@@ -271,7 +271,7 @@ def get_fetch_start_date() -> date:
             row = cur.fetchone()
 
     if row and row[0]:
-        since = max(configured_start, row[0] - timedelta(days=2))
+        since = max(configured_start, row[0] - timedelta(days=7))
     else:
         since = configured_start
 
@@ -1155,7 +1155,7 @@ def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
                 parse_date(item.get("pdate")) or
                 parse_date(item.get("published_date"))
             )
-            if notice_date and notice_date >= since and notice_date >= ABSOLUTE_START:
+            if notice_date and notice_date >= since:
                 all_too_old = False
                 nid = str(
                     item.get("id") or item.get("nid") or
@@ -1312,7 +1312,7 @@ def run():
                 VALUES ('last_run_baseline_date', %s, NOW())
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
                 """,
-                (settings.get("baseline_date", "2025-01-01"),),
+                (settings.get("baseline_date", (date.today() - timedelta(days=730)).isoformat()),),
             )
         conn.commit()
 

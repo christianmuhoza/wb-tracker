@@ -207,7 +207,7 @@ function FetchButton({ onDone }) {
         return false
       }
 
-      if (startedAt && Date.now() - startedAt > 10 * 60 * 1000 + 15000) {
+      if (startedAt && Date.now() - startedAt > 300 * 60 * 1000 + 15000) {
         setState('error')
         setLog('The fetch took too long to complete. Please check the backend logs.')
         return false
@@ -267,7 +267,7 @@ function FetchButton({ onDone }) {
 
   return (
     <div style={{ position: 'relative' }}>
-      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+
       <button onClick={state === 'running' ? undefined : (state !== 'idle' ? () => { setState('idle'); setLog('') } : trigger)} style={{ background: colors.bg, border: `1px solid ${colors.border}`, color: colors.text, borderRadius: 8, padding: '8px 16px', fontSize: 13, fontWeight: 600, cursor: state === 'running' ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 7, transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
         {icons[state]}
         {labels[state]}
@@ -294,8 +294,8 @@ export default function Overview() {
   const dashboardUrl = useMemo(() => buildDashboardUrl(refreshKey, filters), [refreshKey, filters])
   const countryUrl = useMemo(() => selectedCountry ? buildDashboardUrl(refreshKey, { ...filters, country: selectedCountry }) : null, [refreshKey, filters, selectedCountry])
 
-  const { data, loading, error } = useApi(dashboardUrl, [dashboardUrl])
-  const { data: countryData, loading: countryLoading, error: countryError } = useApi(countryUrl, [countryUrl])
+  const { data, loading, error } = useApi(dashboardUrl)
+  const { data: countryData, loading: countryLoading, error: countryError } = useApi(countryUrl)
 
   const handleFetchDone = useCallback(() => {
     setTimeout(() => setRefreshKey(k => k + 1), 1000)

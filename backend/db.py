@@ -51,7 +51,7 @@ def ensure_support_tables():
             cur.execute("""
                 INSERT INTO app_settings (key, value)
                 VALUES
-                    ('baseline_date', '2025-01-01'),
+                    ('baseline_date', (CURRENT_DATE - INTERVAL '2 years')::text),
                     ('country_batch', '5'),
                     ('request_delay', '1.2'),
                     ('auto_sync_hour', '06:00')

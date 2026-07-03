@@ -56,8 +56,10 @@ export default function Settings() {
     setRefreshKey(k => k + 1)
   }
 
+  const defaultDate = () => new Date(Date.now() - 730 * 86400000).toISOString().split('T')[0]
+
   const backfillCountry = async (name) => {
-    const since = form.baseline_date || general?.baseline_date || '2025-01-01'
+    const since = form.baseline_date || general?.baseline_date || defaultDate()
     const res = await fetch(`/api/fetch/backfill/${encodeURIComponent(name)}?since=${encodeURIComponent(since)}`, { method: 'POST' })
     setMessage(res.ok ? `${name} backfill started from ${since}. Refresh in a moment.` : `Could not start ${name} backfill.`)
     setRefreshKey(k => k + 1)
@@ -94,19 +96,19 @@ export default function Settings() {
             <div style={{ display: 'grid', gap: 14 }}>
               <div>
                 <label style={{ display: 'block', fontSize: 11, color: 'var(--text3)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>Baseline Date</label>
-                <input type="date" defaultValue={general?.baseline_date} onChange={e => setForm(current => ({ ...current, baseline_date: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
+                <input type="date" value={form.baseline_date || general?.baseline_date || ''} onChange={e => setForm(current => ({ ...current, baseline_date: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: 11, color: 'var(--text3)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>Country Batch Size</label>
-                <input type="number" defaultValue={general?.country_batch} onChange={e => setForm(current => ({ ...current, country_batch: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
+                <input type="number" value={form.country_batch || general?.country_batch || ''} onChange={e => setForm(current => ({ ...current, country_batch: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: 11, color: 'var(--text3)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>Request Delay</label>
-                <input type="number" step="0.1" defaultValue={general?.request_delay} onChange={e => setForm(current => ({ ...current, request_delay: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
+                <input type="number" step="0.1" value={form.request_delay || general?.request_delay || ''} onChange={e => setForm(current => ({ ...current, request_delay: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: 11, color: 'var(--text3)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>Auto Sync Hour</label>
-                <input type="time" defaultValue={general?.auto_sync_hour} onChange={e => setForm(current => ({ ...current, auto_sync_hour: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
+                <input type="time" value={form.auto_sync_hour || general?.auto_sync_hour || ''} onChange={e => setForm(current => ({ ...current, auto_sync_hour: e.target.value }))} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
               </div>
               <button onClick={saveSettings} style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: '#fff', borderRadius: 8, padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 8, width: 'fit-content' }}>
                 <Save size={14} />

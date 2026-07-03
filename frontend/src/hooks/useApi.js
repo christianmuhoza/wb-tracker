@@ -17,7 +17,7 @@ export function useApi(url, deps = []) {
     setLoading(true)
     setError(null)
     fetch(url, { signal: controller.signal })
-      .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json() })
+      .then(r => { if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`); return r.json() })
       .then(d  => {
         if (!active) return
         setData(d)

@@ -16,7 +16,7 @@ from typing import Optional, List, Dict, Any
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -178,6 +178,8 @@ def get_notices(
     tech_only:   bool           = Query(False),
     page:        int            = Query(1, ge=1),
     page_size:   int            = Query(25, le=100),
+    sort_by:     str            = Query("notice_date", regex="^(notice_date|award_date)$"),
+    sort_order:  str            = Query("desc", regex="^(asc|desc)$"),
 ):
     where, params = build_where(country, notice_type, status, from_date, to_date, search, tech_only)
     offset = (page - 1) * page_size
@@ -192,6 +194,15 @@ def get_notices(
             ORDER BY country
         """)]
 
+    dir = "DESC" if sort_order == "desc" else "ASC"
+
+    if sort_by == "award_date":
+        order_clause = f"(SELECT MAX(ba.award_date) FROM bidder_awards ba WHERE ba.notice_id = procurement_notices.id) {dir} NULLS LAST"
+        select_extra = ", (SELECT MAX(ba.award_date) FROM bidder_awards ba WHERE ba.notice_id = procurement_notices.id)::text AS award_date"
+    else:
+        order_clause = f"notice_date {dir} NULLS LAST"
+        select_extra = ""
+
     rows = q(
         f"""SELECT
                 id, project_id, project_name, country, notice_type,
@@ -200,9 +211,10 @@ def get_notices(
                 notice_date::text,
                 contract_amount, currency, borrower, contact_email, url, status,
                 fetched_at
+                {select_extra}
             FROM procurement_notices
             WHERE {where}
-            ORDER BY notice_date DESC NULLS LAST
+            ORDER BY {order_clause}
             LIMIT %s OFFSET %s""",
         params + [page_size, offset]
     )
@@ -476,7 +488,6 @@ def get_dashboard(
             WHERE {where} AND notice_date IS NOT NULL
             GROUP BY TO_CHAR(notice_date::date, 'YYYY-MM')
             ORDER BY month DESC
-            LIMIT 12
         """, params)
 
         top_borrowers = q(f"""
@@ -582,7 +593,7 @@ def get_dashboard(
                 "search": search or "",
             },
             "settings": {
-                "baseline_date": settings.get("baseline_date", "2025-01-01"),
+                "baseline_date": settings.get("baseline_date", (date.today() - timedelta(days=730)).isoformat()),
                 "country_batch": int(float(settings.get("country_batch", 5))),
                 "request_delay": float(settings.get("request_delay", 1.2)),
                 "auto_sync_hour": settings.get("auto_sync_hour", "06:00"),
@@ -690,7 +701,7 @@ def remove_country(name: str):
 def get_general_settings():
     settings = get_app_settings_map()
     return {
-        "baseline_date": settings.get("baseline_date", "2025-01-01"),
+        "baseline_date": settings.get("baseline_date", (date.today() - timedelta(days=730)).isoformat()),
         "country_batch": int(float(settings.get("country_batch", 5))),
         "request_delay": float(settings.get("request_delay", 1.2)),
         "auto_sync_hour": settings.get("auto_sync_hour", "06:00"),
@@ -1617,10 +1628,6 @@ def migrate_db():
         "UPDATE procurement_notices SET notice_status = status WHERE notice_status IS NULL",
         "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS contract_amount NUMERIC",
         "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS currency TEXT",
-        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS linkedin_url TEXT",
-        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS business_model TEXT",
-        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS core_products TEXT",
-        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS corporate_activities TEXT",
         """CREATE TABLE IF NOT EXISTS bidders (
             id SERIAL PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
@@ -1650,6 +1657,10 @@ def migrate_db():
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(bidder_id, notice_id)
         )""",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS linkedin_url TEXT",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS business_model TEXT",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS core_products TEXT",
+        "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS corporate_activities TEXT",
     ]
     with db() as conn:
         with conn.cursor() as cur:

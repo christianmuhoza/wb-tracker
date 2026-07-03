@@ -1,10 +1,10 @@
 import { Fragment, useState } from 'react'
 import { useApi, buildUrl } from '../hooks/useApi.js'
-import { Search, ExternalLink, ChevronLeft, ChevronRight, X, Download, Loader, BookmarkPlus, Trash2, FileDown, Cpu } from 'lucide-react'
+import { Search, ExternalLink, ChevronLeft, ChevronRight, X, Download, Loader, BookmarkPlus, Trash2, FileDown, Cpu, ArrowDown, ArrowUp } from 'lucide-react'
 
 const COLORS = { IFB: '#00d4aa', REOI: '#7c6fff', 'Contract Award': '#f0a500', Award: '#f0a500' }
 const NOTICE_TYPE_OPTIONS = ['IFB', 'REOI', 'Contract Award']
-const STATUSES = ['Active', 'Awarded', 'Cancelled', 'Closed', 'Pending']
+const STATUSES = ['Active', 'Awarded', 'Cancelled', 'Closed', 'Pending', 'Published']
 
 function Badge({ type }) {
   return (
@@ -36,6 +36,7 @@ function StatusBadge({ status }) {
 }
 
 function FilterSelect({ label, value, onChange, options }) {
+  const isObj = typeof options[0] === 'object'
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <label style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</label>
@@ -48,7 +49,11 @@ function FilterSelect({ label, value, onChange, options }) {
         }}
       >
         <option value="">All</option>
-        {options.map(option => <option key={option} value={option}>{option}</option>)}
+        {options.map(o => {
+          const v = isObj ? o.value : o
+          const l = isObj ? o.label : o
+          return <option key={v} value={v}>{l}</option>
+        })}
       </select>
     </div>
   )
@@ -469,7 +474,7 @@ function StructuredDescription({ html, noticeType, contactEmail }) {
                   gridTemplateColumns: '210px 1fr',
                   gap: 12,
                   padding: '6px 0',
-                  borderTop: index === 0 ? '1px solid rgba(255,255,255,0.05)' : '1px solid rgba(255,255,255,0.05)'
+                    borderTop: '1px solid rgba(255,255,255,0.05)'
                 }}
               >
                 <div style={{
@@ -816,7 +821,7 @@ function ExportButton({ filters, total }) {
       >
         {state === 'loading' ? <Loader size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Download size={14} />}
         {state === 'loading' ? 'Exporting...' : state === 'error' ? 'Export Failed' : `Export Options${total > 0 ? ` (${total.toLocaleString()})` : ''}`}
-        <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+
       </button>
 
       {/* Dropdown Menu */}
@@ -1233,9 +1238,12 @@ function ExportButton({ filters, total }) {
 export default function Notices() {
   const [filters, setFilters] = useState({
     country: '', notice_type: '', status: '', search: '',
-    from_date: '', to_date: '', tech_only: false, page: 1
+    from_date: '', to_date: '', tech_only: false, page: 1,
+    sort_by: 'notice_date', sort_order: 'desc'
   })
   const [expanded, setExpanded] = useState(null)
+  const [watchlistNamePrompt, setWatchlistNamePrompt] = useState(false)
+  const [watchlistName, setWatchlistName] = useState('')
   const [watchlists, setWatchlists] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem('wb_notice_watchlists') || '[]')
@@ -1245,7 +1253,7 @@ export default function Notices() {
   })
 
   const url = buildUrl('/api/notices', { ...filters, page_size: 25 })
-  const { data, loading } = useApi(url, [url])
+  const { data, loading } = useApi(url)
 
   const set = (key, value) => {
     setExpanded(null)
@@ -1264,11 +1272,15 @@ export default function Notices() {
   }
 
   const saveWatchlist = () => {
-    const name = window.prompt('Watchlist name')
-    if (!name) return
+    setWatchlistName('')
+    setWatchlistNamePrompt(true)
+  }
+
+  const confirmWatchlist = () => {
+    if (!watchlistName.trim()) return
     const entry = {
       id: Date.now(),
-      name: name.trim(),
+      name: watchlistName.trim(),
       filters: {
         country: filters.country,
         notice_type: filters.notice_type,
@@ -1280,6 +1292,7 @@ export default function Notices() {
       }
     }
     persistWatchlists([entry, ...watchlists.filter(item => item.name !== entry.name)].slice(0, 12))
+    setWatchlistNamePrompt(false)
   }
 
   const loadWatchlist = (watchlist) => {
@@ -1293,10 +1306,11 @@ export default function Notices() {
 
   const clearFilters = () => {
     setExpanded(null)
-    setFilters({
+    setFilters(current => ({
       country: '', notice_type: '', status: '', search: '',
-      from_date: '', to_date: '', tech_only: false, page: 1
-    })
+      from_date: '', to_date: '', tech_only: false, page: 1,
+      sort_by: current.sort_by, sort_order: current.sort_order
+    }))
   }
 
   return (
@@ -1323,6 +1337,19 @@ export default function Notices() {
             <BookmarkPlus size={14} />
             Save Current Filters
           </button>
+          {watchlistNamePrompt && (
+            <>
+              <div onClick={() => setWatchlistNamePrompt(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 999 }} />
+              <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 1000, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 24, minWidth: 320 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 12 }}>Name your watchlist</div>
+                <input value={watchlistName} onChange={e => setWatchlistName(e.target.value)} onKeyDown={e => e.key === 'Enter' && confirmWatchlist()} placeholder="Watchlist name" autoFocus style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px', fontSize: 13, marginBottom: 12 }} />
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                  <button onClick={() => setWatchlistNamePrompt(false)} style={{ background: 'transparent', border: '1px solid var(--border)', color: 'var(--text3)', borderRadius: 8, padding: '8px 12px', fontSize: 12 }}>Cancel</button>
+                  <button onClick={confirmWatchlist} style={{ background: 'var(--accent)', border: 'none', color: '#fff', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 600 }}>Save</button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
         {watchlists.length > 0 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
@@ -1375,6 +1402,25 @@ export default function Notices() {
               style={{ background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '7px 10px', fontSize: 13, outline: 'none' }}
             />
           </div>
+          <FilterSelect label="Sort By" value={filters.sort_by} onChange={value => set('sort_by', value)} options={[
+            { value: 'notice_date', label: 'Notice Date' },
+            { value: 'award_date', label: 'Award Date' },
+          ]} />
+          <button
+            onClick={() => set('sort_order', filters.sort_order === 'desc' ? 'asc' : 'desc')}
+            style={{
+              background: 'var(--surface2)',
+              border: '1px solid var(--border)',
+              color: 'var(--text2)',
+              borderRadius: 8, padding: '7px 12px', fontSize: 13,
+              display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+              marginBottom: 4
+            }}
+            title={filters.sort_order === 'desc' ? 'Newest first' : 'Oldest first'}
+          >
+            {filters.sort_order === 'desc' ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+            {filters.sort_order === 'desc' ? 'Newest' : 'Oldest'}
+          </button>
           <button
             onClick={() => set('tech_only', !filters.tech_only)}
             style={{
@@ -1415,15 +1461,15 @@ export default function Notices() {
         <table style={{ width: '100%', minWidth: 1200, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border)', background: 'var(--surface2)' }}>
-              {['Tech', 'Country', 'Type', 'Status', 'Title', 'Project ID', 'Borrower', 'Notice Date', 'Deadline', ''].map(header => (
+              {['Tech', 'Country', 'Type', 'Status', 'Title', 'Project ID', 'Borrower', 'Notice Date', 'Award Date', 'Deadline', ''].map(header => (
                 <th key={header} style={{ textAlign: 'left', padding: '12px 14px', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--font-mono)', fontWeight: 400, textTransform: 'uppercase', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>{header}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td colSpan={10} style={{ padding: 32, textAlign: 'center', color: 'var(--text3)' }}>Loading notices...</td></tr>}
+            {loading && <tr><td colSpan={11} style={{ padding: 32, textAlign: 'center', color: 'var(--text3)' }}>Loading notices...</td></tr>}
             {!loading && notices.length === 0 && (
-              <tr><td colSpan={10} style={{ padding: 32, textAlign: 'center', color: 'var(--text3)' }}>No notices found. Try different filters or run the fetcher.</td></tr>
+              <tr><td colSpan={11} style={{ padding: 32, textAlign: 'center', color: 'var(--text3)' }}>No notices found. Try different filters or run the fetcher.</td></tr>
             )}
             {notices.map((notice, index) => (
               <Fragment key={notice.id}>
@@ -1435,7 +1481,7 @@ export default function Notices() {
                   onClick={() => setExpanded(expanded === notice.id ? null : notice.id)}
                   style={{
                     borderBottom: '1px solid var(--border)',
-                    background: expanded === notice.id ? 'var(--surface2)' : index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)',
+                    background: expanded === notice.id ? 'var(--surface2)' : index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.03)',
                     cursor: 'pointer', transition: 'background 0.1s'
                   }}
                 >
@@ -1469,6 +1515,7 @@ export default function Notices() {
                     </div>
                   </td>
                   <td style={{ padding: '11px 14px', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text2)', whiteSpace: 'nowrap' }}>{notice.notice_date || '--'}</td>
+                  <td style={{ padding: '11px 14px', fontFamily: 'var(--font-mono)', fontSize: 12, color: notice.award_date ? 'var(--accent)' : 'var(--text3)', whiteSpace: 'nowrap' }}>{notice.award_date || '--'}</td>
                   <td style={{ padding: '11px 14px', fontFamily: 'var(--font-mono)', fontSize: 12, color: notice.submission_date ? 'var(--warn)' : 'var(--text3)', whiteSpace: 'nowrap' }}>{notice.submission_date || '--'}</td>
                   <td style={{ padding: '11px 14px' }}>
                     {notice.url && <a href={notice.url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}><ExternalLink size={13} color="var(--text3)" /></a>}
@@ -1477,7 +1524,7 @@ export default function Notices() {
 
                   {expanded === notice.id && (
                     <tr style={{ background: 'var(--surface2)', borderBottom: '1px solid var(--border)' }}>
-                      <td colSpan={10} style={{ padding: '20px 28px' }}>
+                      <td colSpan={11} style={{ padding: '20px 28px' }}>
                       {/* Header with Logo and Title */}
                       <div style={{ 
                         display: 'flex', 
@@ -1596,47 +1643,8 @@ export default function Notices() {
                         }}>
                           <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--text)' }}>
                             {notice.description ? (
-                              <div>
-                                {/* Extract requirements from description */}
-                                {(() => {
-                                  const desc = notice.description.replace(/<[^>]*>/g, '').toLowerCase();
-                                  const requirements = [];
-                                  
-                                  // Look for common requirement patterns
-                                  if (desc.includes('qualification')) requirements.push('Professional qualifications and certifications required');
-                                  if (desc.includes('experience')) requirements.push('Relevant work experience in similar projects');
-                                  if (desc.includes('financial')) requirements.push('Financial capacity and stability');
-                                  if (desc.includes('technical')) requirements.push('Technical capability and expertise');
-                                  if (desc.includes('equipment')) requirements.push('Necessary equipment and tools');
-                                  
-                                  // Add generic requirements if none found
-                                  if (requirements.length === 0) {
-                                    requirements.push('Compliance with World Bank procurement guidelines');
-                                    requirements.push('Valid business registration and licenses');
-                                    requirements.push('Proof of previous project completion');
-                                    requirements.push('Technical and financial capacity');
-                                    requirements.push('Submission deadline adherence');
-                                  }
-                                  
-                                  return requirements.slice(0, 5).map((req, index) => (
-                                    <div key={index} style={{ 
-                                      marginBottom: 8, 
-                                      paddingLeft: 16,
-                                      position: 'relative',
-                                      fontSize: 12
-                                    }}>
-                                      <span style={{ 
-                                        position: 'absolute', 
-                                        left: 0, 
-                                        color: 'var(--accent)',
-                                        fontWeight: 600
-                                      }}>
-                                        {index + 1}.
-                                      </span>
-                                      {req}
-                                    </div>
-                                  ));
-                                })()}
+                              <div style={{ color: 'var(--text3)', fontStyle: 'italic' }}>
+                                Key requirements are embedded in the description below. No structured list available.
                               </div>
                             ) : (
                               <div style={{ color: 'var(--text3)', fontStyle: 'italic' }}>
