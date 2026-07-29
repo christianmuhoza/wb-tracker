@@ -41,7 +41,7 @@ export function useApi(url, deps = []) {
 export function buildUrl(base, params = {}) {
   const u = new URLSearchParams()
   Object.entries(params).forEach(([k, v]) => {
-    if (v !== '' && v !== null && v !== undefined) u.append(k, v)
+    if (v !== '' && v !== null && v !== undefined && v !== false) u.append(k, v)
   })
   const qs = u.toString()
   return qs ? `${base}?${qs}` : base

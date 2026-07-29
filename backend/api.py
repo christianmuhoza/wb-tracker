@@ -27,9 +27,10 @@ import requests
 from bs4 import BeautifulSoup
 
 from db import db, q, ensure_support_tables, get_app_settings_map
-from services.tech import build_tech_notice_condition, classify_notice_tech, looks_like_tech_bidder
+from services.tech import build_tech_notice_condition, build_tech_bidder_condition, classify_notice_tech, looks_like_tech_bidder
 from services.contact_enrichment import search_company_contact
 from services.gemini_service import classify_and_enrich_with_gemini
+from services.software_intelligence import classify_software_opportunity_with_gemini
 from services.bidder_extraction import (
     parse_notice_bidder_details, extract_bidders_list, extract_bidders_from_description,
     extract_awarded_bidders, fetch_bidders_from_detail_page, _infer_notice_category,
@@ -122,7 +123,7 @@ def get_country_fetch_status_rows():
 
 # ── Shared filter builder ─────────────────────────────────────────────────────
 
-def build_where(country, notice_type, status, from_date, to_date, search, tech_only=False):
+def build_where(country, notice_type, status, from_date, to_date, search, tech_only=False, borrower=None):
     filters = ["1=1"]
     params  = []
 
@@ -157,6 +158,9 @@ def build_where(country, notice_type, status, from_date, to_date, search, tech_o
         filters.append("(title ILIKE %s OR description ILIKE %s OR project_name ILIKE %s)")
         like = f"%{search}%"
         params.extend([like, like, like])
+    if borrower:
+        filters.append("borrower = %s")
+        params.append(borrower)
     if tech_only:
         tech_filter, tech_params = build_tech_notice_condition()
         filters.append(tech_filter)
@@ -175,13 +179,14 @@ def get_notices(
     from_date:   Optional[date] = Query(None),
     to_date:     Optional[date] = Query(None),
     search:      Optional[str]  = Query(None),
+    borrower:    Optional[str]  = Query(None),
     tech_only:   bool           = Query(False),
     page:        int            = Query(1, ge=1),
     page_size:   int            = Query(25, le=100),
     sort_by:     str            = Query("notice_date", regex="^(notice_date|award_date)$"),
     sort_order:  str            = Query("desc", regex="^(asc|desc)$"),
 ):
-    where, params = build_where(country, notice_type, status, from_date, to_date, search, tech_only)
+    where, params = build_where(country, notice_type, status, from_date, to_date, search, tech_only, borrower)
     offset = (page - 1) * page_size
 
     country_rows = q("SELECT name FROM target_countries ORDER BY name")
@@ -196,12 +201,18 @@ def get_notices(
 
     dir = "DESC" if sort_order == "desc" else "ASC"
 
+    award_date_subq = "(SELECT MAX(ba.award_date) FROM bidder_awards ba WHERE ba.notice_id = procurement_notices.id)"
     if sort_by == "award_date":
-        order_clause = f"(SELECT MAX(ba.award_date) FROM bidder_awards ba WHERE ba.notice_id = procurement_notices.id) {dir} NULLS LAST"
-        select_extra = ", (SELECT MAX(ba.award_date) FROM bidder_awards ba WHERE ba.notice_id = procurement_notices.id)::text AS award_date"
+        order_clause = f"{award_date_subq} {dir} NULLS LAST"
     else:
         order_clause = f"notice_date {dir} NULLS LAST"
-        select_extra = ""
+
+    award_amount_subq = "(SELECT MAX(ba.award_amount) FROM bidder_awards ba WHERE ba.notice_id = procurement_notices.id AND ba.won IS TRUE)"
+    award_currency_subq = """
+        (SELECT ba.currency FROM bidder_awards ba
+         WHERE ba.notice_id = procurement_notices.id AND ba.won IS TRUE
+         ORDER BY ba.award_amount DESC NULLS LAST LIMIT 1)
+    """
 
     rows = q(
         f"""SELECT
@@ -210,8 +221,10 @@ def get_notices(
                 COALESCE(submission_date, submission_deadline::date)::text AS submission_date,
                 notice_date::text,
                 contract_amount, currency, borrower, contact_email, url, status,
-                fetched_at
-                {select_extra}
+                fetched_at,
+                {award_date_subq}::text AS award_date,
+                {award_amount_subq} AS award_amount,
+                {award_currency_subq} AS award_currency
             FROM procurement_notices
             WHERE {where}
             ORDER BY {order_clause}
@@ -224,6 +237,8 @@ def get_notices(
     for row in rows:
         item = dict(row)
         item.update(classify_notice_tech(item))
+        if tech_only and not item["is_tech"]:
+            continue
         output_rows.append(item)
 
     return {
@@ -737,6 +752,315 @@ def update_general_settings(body: GeneralSettingsBody):
     return get_general_settings()
 
 
+
+# Award alert matching ---------------------------------------------------------
+
+def ensure_award_alert_tables():
+    ensure_support_tables()
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS award_alerts (
+                    id SERIAL PRIMARY KEY,
+                    source_notice_id TEXT NOT NULL REFERENCES procurement_notices(id) ON DELETE CASCADE,
+                    award_notice_id TEXT NOT NULL REFERENCES procurement_notices(id) ON DELETE CASCADE,
+                    match_status TEXT NOT NULL DEFAULT 'auto_matched',
+                    match_score INT NOT NULL DEFAULT 0,
+                    matched_reason TEXT,
+                    seen_at TIMESTAMPTZ,
+                    dismissed_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(source_notice_id, award_notice_id)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_seen ON award_alerts (seen_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_status ON award_alerts (match_status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_award ON award_alerts (award_notice_id)")
+        conn.commit()
+
+
+def _norm_match_value(value):
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _token_set(value):
+    stop = {"the", "and", "for", "of", "to", "in", "on", "with", "a", "an", "no", "number"}
+    return {
+        token for token in re.findall(r"[a-z0-9]+", _norm_match_value(value))
+        if len(token) > 2 and token not in stop
+    }
+
+
+def _title_overlap_score(source, award):
+    left = _token_set(source.get("title") or source.get("project_name"))
+    right = _token_set(award.get("title") or award.get("project_name"))
+    if not left or not right:
+        return 0
+    overlap = len(left & right) / max(1, min(len(left), len(right)))
+    return min(20, int(overlap * 20))
+
+
+def score_award_match(source, award):
+    score = 0
+    reasons = []
+
+    checks = [
+        ("project_id", 45, "same project ID"),
+        ("borrower_bid_reference", 35, "same borrower bid reference"),
+        ("notice_no", 25, "same notice number"),
+        ("project_name", 20, "same project name"),
+        ("borrower", 10, "same borrower"),
+    ]
+    for field, points, reason in checks:
+        source_value = _norm_match_value(source.get(field))
+        award_value = _norm_match_value(award.get(field))
+        if source_value and award_value and source_value == award_value:
+            score += points
+            reasons.append(reason)
+
+    overlap = _title_overlap_score(source, award)
+    if overlap:
+        score += overlap
+        reasons.append(f"title overlap {overlap}/20")
+
+    return score, ", ".join(reasons) if reasons else "weak text similarity"
+
+
+def sync_award_alerts():
+    ensure_award_alert_tables()
+    award_rows = q("""
+        SELECT id, project_id, project_name, country, notice_no, notice_type, status,
+               borrower_bid_reference, borrower, title, notice_date::text, fetched_at::text
+        FROM procurement_notices
+        WHERE notice_type IN ('Contract Award', 'Award') OR status = 'Awarded'
+        ORDER BY fetched_at DESC NULLS LAST, notice_date DESC NULLS LAST
+    """)
+
+    created = 0
+    reviewed = 0
+    with db() as conn:
+        with conn.cursor() as cur:
+            for award in award_rows:
+                candidates = q("""
+                    SELECT id, project_id, project_name, country, notice_no, notice_type, status,
+                           borrower_bid_reference, borrower, title, notice_date::text
+                    FROM procurement_notices
+                    WHERE id <> %s
+                      AND notice_type IN ('IFB', 'REOI')
+                      AND (%s IS NULL OR country = %s)
+                      AND (
+                          (NULLIF(project_id, '') IS NOT NULL AND project_id = %s)
+                          OR (NULLIF(borrower_bid_reference, '') IS NOT NULL AND borrower_bid_reference = %s)
+                          OR (NULLIF(notice_no, '') IS NOT NULL AND notice_no = %s)
+                          OR (NULLIF(project_name, '') IS NOT NULL AND LOWER(project_name) = LOWER(%s))
+                      )
+                    ORDER BY notice_date DESC NULLS LAST
+                    LIMIT 20
+                """, [
+                    award["id"], award.get("country"), award.get("country"),
+                    award.get("project_id"), award.get("borrower_bid_reference"),
+                    award.get("notice_no"), award.get("project_name"),
+                ])
+
+                for source in candidates:
+                    score, reason = score_award_match(source, award)
+                    if score < 40:
+                        continue
+                    status = "auto_matched" if score >= 55 else "needs_review"
+                    cur.execute("""
+                        INSERT INTO award_alerts
+                            (source_notice_id, award_notice_id, match_status, match_score, matched_reason, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                        ON CONFLICT (source_notice_id, award_notice_id) DO UPDATE SET
+                            match_status = EXCLUDED.match_status,
+                            match_score = EXCLUDED.match_score,
+                            matched_reason = EXCLUDED.matched_reason,
+                            updated_at = NOW()
+                        WHERE award_alerts.match_status <> 'rejected'
+                        RETURNING id, (xmax = 0) AS inserted
+                    """, [source["id"], award["id"], status, score, reason])
+                    row = cur.fetchone()
+                    if row:
+                        if row.get("inserted"):
+                            created += 1
+                        else:
+                            reviewed += 1
+        conn.commit()
+
+    return {"status": "ok", "created": created, "updated": reviewed, "awards_checked": len(award_rows)}
+
+
+@app.post("/api/award-alerts/sync")
+def sync_award_alerts_endpoint():
+    return sync_award_alerts()
+
+
+@app.get("/api/award-alerts")
+def list_award_alerts(
+    unread_only: bool = Query(False),
+    status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+):
+    ensure_award_alert_tables()
+    filters = ["aa.dismissed_at IS NULL"]
+    params: List[Any] = []
+    if unread_only:
+        filters.append("aa.seen_at IS NULL")
+    if status:
+        filters.append("aa.match_status = %s")
+        params.append(status)
+    where = " AND ".join(filters)
+    offset = (page - 1) * page_size
+
+    total_rows = q(f"SELECT COUNT(*) AS cnt FROM award_alerts aa WHERE {where}", params)
+    unread_rows = q("SELECT COUNT(*) AS cnt FROM award_alerts aa WHERE aa.dismissed_at IS NULL AND aa.seen_at IS NULL")
+    rows = q(f"""
+        SELECT
+            aa.id,
+            aa.match_status,
+            aa.match_score,
+            aa.matched_reason,
+            aa.seen_at::text,
+            aa.created_at::text,
+            src.id AS source_notice_id,
+            src.notice_type AS source_notice_type,
+            src.title AS source_title,
+            src.project_id AS source_project_id,
+            src.project_name AS source_project_name,
+            src.country AS source_country,
+            src.borrower AS source_borrower,
+            src.notice_date::text AS source_notice_date,
+            src.url AS source_url,
+            award.id AS award_notice_id,
+            award.notice_type AS award_notice_type,
+            award.title AS award_title,
+            award.project_id AS award_project_id,
+            award.project_name AS award_project_name,
+            award.country AS award_country,
+            award.borrower AS award_borrower,
+            award.notice_date::text AS award_notice_date,
+            COALESCE((
+                SELECT MAX(ba.award_amount) FROM bidder_awards ba
+                WHERE ba.notice_id = award.id AND ba.won IS TRUE
+            ), award.contract_amount) AS award_amount,
+            COALESCE((
+                SELECT ba.currency FROM bidder_awards ba
+                WHERE ba.notice_id = award.id AND ba.won IS TRUE
+                ORDER BY ba.award_amount DESC NULLS LAST LIMIT 1
+            ), award.currency) AS award_currency,
+            award.url AS award_url,
+            award.description AS award_description,
+            COALESCE((
+                SELECT STRING_AGG(b.name, ', ' ORDER BY b.name ASC)
+                FROM bidder_awards ba
+                JOIN bidders b ON b.id = ba.bidder_id
+                WHERE ba.notice_id = award.id AND ba.won IS TRUE
+            ), '') AS awarded_bidders
+        FROM award_alerts aa
+        JOIN procurement_notices src ON src.id = aa.source_notice_id
+        JOIN procurement_notices award ON award.id = aa.award_notice_id
+        WHERE {where}
+        ORDER BY aa.seen_at IS NOT NULL, aa.created_at DESC, aa.match_score DESC
+        LIMIT %s OFFSET %s
+    """, params + [page_size, offset])
+
+    _AMOUNT_RE = re.compile(
+        r'(?:Signed\s+Contract\s+[Pp]rice|Evaluated\s+Bid\s+Price|'
+        r'Contract\s+Amount|Award\s+Amount|Total\s+Contract\s+Price)'
+        r'\s*[:\n]?\s*(?:[A-Z]{3})?\s*([\d,]+(?:\.\d+)?)',
+        re.IGNORECASE,
+    )
+
+    for row in rows:
+        if row.get("award_amount") is not None:
+            continue
+        desc = row.get("award_description") or ""
+        if not desc:
+            continue
+        m = _AMOUNT_RE.search(desc)
+        if m:
+            try:
+                row["award_amount"] = float(m.group(1).replace(",", ""))
+            except (ValueError, TypeError):
+                pass
+        if row.get("award_amount") is None:
+            m2 = re.search(r'([\d,]+(?:\.\d+)?)\s*(?:USD|US\$)', desc)
+            if m2:
+                try:
+                    row["award_amount"] = float(m2.group(1).replace(",", ""))
+                    if not row.get("award_currency"):
+                        row["award_currency"] = "USD"
+                except (ValueError, TypeError):
+                    pass
+
+    for row in rows:
+        row.pop("award_description", None)
+
+    return {
+        "total": total_rows[0]["cnt"] if total_rows else 0,
+        "unread": unread_rows[0]["cnt"] if unread_rows else 0,
+        "page": page,
+        "page_size": page_size,
+        "data": [dict(row) for row in rows],
+    }
+
+
+@app.put("/api/award-alerts/{alert_id}/seen")
+def mark_award_alert_seen(alert_id: int):
+    ensure_award_alert_tables()
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE award_alerts
+                SET seen_at = COALESCE(seen_at, NOW()), updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+            """, [alert_id])
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Award alert not found")
+    return {"status": "ok", "id": alert_id}
+
+
+@app.post("/api/award-alerts/mark-all-seen")
+def mark_all_award_alerts_seen():
+    ensure_award_alert_tables()
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE award_alerts
+                SET seen_at = COALESCE(seen_at, NOW()), updated_at = NOW()
+                WHERE dismissed_at IS NULL AND seen_at IS NULL
+            """)
+            count = cur.rowcount
+        conn.commit()
+    return {"status": "ok", "updated": count}
+
+
+@app.put("/api/award-alerts/{alert_id}/status")
+def update_award_alert_status(alert_id: int, match_status: str = Query(..., regex="^(confirmed|rejected|needs_review|auto_matched)$")):
+    ensure_award_alert_tables()
+    dismissed_expr = "NOW()" if match_status == "rejected" else "NULL"
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                UPDATE award_alerts
+                SET match_status = %s,
+                    dismissed_at = {dismissed_expr},
+                    seen_at = COALESCE(seen_at, NOW()),
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+            """, [match_status, alert_id])
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Award alert not found")
+    return {"status": "ok", "id": alert_id, "match_status": match_status}
+
 # ── Fetch trigger ─────────────────────────────────────────────────────────────
 
 _fetch_status = {
@@ -767,11 +1091,18 @@ def trigger_fetch():
                 [sys.executable, fetcher_path],
                 capture_output=True, text=True, timeout=18000
             )
+            alert_result = None
+            if result.returncode == 0:
+                try:
+                    alert_result = sync_award_alerts()
+                except Exception as alert_error:
+                    alert_result = {"status": "error", "error": str(alert_error)}
             _fetch_status["last_result"] = {
                 "exit_code": result.returncode,
                 "stdout":    result.stdout[-3000:],
                 "stderr":    result.stderr[-1000:],
                 "success":   result.returncode == 0,
+                "award_alerts": alert_result,
             }
         except subprocess.TimeoutExpired:
             _fetch_status["last_result"] = {
@@ -901,6 +1232,77 @@ def resolve_export_fields(fields: Optional[str]) -> List[str]:
     if not selected_fields:
         return DEFAULT_EXPORT_FIELDS.copy()
     return [field for field in selected_fields if field in EXPORT_FIELD_CONFIG]
+
+
+BORROWER_EXPORT_FIELD_CONFIG = {
+    'borrower': ("Institution Name", "borrower", 40),
+    'country': ("Country", "country", 18),
+    'total_notices': ("Total Notices", "total_notices", 14),
+    'ifb_count': ("IFB Notices", "ifb_count", 12),
+    'reoi_count': ("REOI Notices", "reoi_count", 12),
+    'award_count': ("Award Notices", "award_count", 14),
+    'first_notice_date': ("First Notice Date", "first_notice_date", 18),
+    'last_notice_date': ("Last Notice Date", "last_notice_date", 18),
+    'recent_30d': ("30-Day Activity", "recent_30d", 14),
+}
+
+DEFAULT_BORROWER_EXPORT_FIELDS = [
+    'borrower', 'country', 'total_notices', 'ifb_count', 'reoi_count',
+    'award_count', 'first_notice_date', 'last_notice_date', 'recent_30d',
+]
+
+
+def resolve_borrower_export_fields(fields: Optional[str]) -> List[str]:
+    selected_fields = [f.strip() for f in (fields or "").split(',') if f.strip()]
+    if not selected_fields:
+        return DEFAULT_BORROWER_EXPORT_FIELDS.copy()
+    return [field for field in selected_fields if field in BORROWER_EXPORT_FIELD_CONFIG]
+
+
+def fetch_borrower_export_rows(search, country, notice_type):
+    filters = ["borrower IS NOT NULL AND TRIM(borrower) <> ''"]
+    params = []
+
+    if search:
+        filters.append("borrower ILIKE %s")
+        params.append(f"%{search}%")
+    if country:
+        filters.append("country = %s")
+        params.append(country)
+    if notice_type:
+        filters.append("""(
+            notice_type = %s OR
+            notice_type ILIKE %s OR
+            notice_type ILIKE %s
+        )""")
+        full = {
+            "IFB":  "%Invitation for Bids%",
+            "REOI": "%Expression of Interest%",
+            "Contract Award": "%Contract Award%",
+            "Award": "%Contract Award%",
+        }
+        params.append(notice_type)
+        params.append(full.get(notice_type, f"%{notice_type}%"))
+        params.append(f"%{notice_type}%")
+
+    where = " AND ".join(filters)
+
+    return q(f"""
+        SELECT
+            borrower,
+            country,
+            COUNT(*)                                                     AS total_notices,
+            COUNT(*) FILTER (WHERE notice_type = 'IFB')                  AS ifb_count,
+            COUNT(*) FILTER (WHERE notice_type = 'REOI')                 AS reoi_count,
+            COUNT(*) FILTER (WHERE notice_type IN ('Award','Contract Award')) AS award_count,
+            MIN(notice_date)::text                                       AS first_notice_date,
+            MAX(notice_date)::text                                       AS last_notice_date,
+            COUNT(*) FILTER (WHERE notice_date >= CURRENT_DATE - INTERVAL '30 days') AS recent_30d
+        FROM procurement_notices
+        WHERE {where}
+        GROUP BY borrower, country
+        ORDER BY total_notices DESC, borrower ASC
+    """, params)
 
 
 DEFAULT_CUSTOM_BIDDER_EXPORT_FIELDS = [
@@ -1658,9 +2060,36 @@ def migrate_db():
             UNIQUE(bidder_id, notice_id)
         )""",
         "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS linkedin_url TEXT",
+        """CREATE TABLE IF NOT EXISTS award_alerts (
+            id SERIAL PRIMARY KEY,
+            source_notice_id TEXT NOT NULL REFERENCES procurement_notices(id) ON DELETE CASCADE,
+            award_notice_id TEXT NOT NULL REFERENCES procurement_notices(id) ON DELETE CASCADE,
+            match_status TEXT NOT NULL DEFAULT 'auto_matched',
+            match_score INT NOT NULL DEFAULT 0,
+            matched_reason TEXT,
+            seen_at TIMESTAMPTZ,
+            dismissed_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(source_notice_id, award_notice_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_award_alerts_seen ON award_alerts (seen_at)",
+        "CREATE INDEX IF NOT EXISTS idx_award_alerts_status ON award_alerts (match_status)",
+        "CREATE INDEX IF NOT EXISTS idx_award_alerts_award ON award_alerts (award_notice_id)",
         "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS business_model TEXT",
         "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS core_products TEXT",
         "ALTER TABLE bidders ADD COLUMN IF NOT EXISTS corporate_activities TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS is_software_related BOOLEAN",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_work_type TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_product_category TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_product_name TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_confidence TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_reason TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_classification_source TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_classified_at TIMESTAMPTZ",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_reviewed BOOLEAN NOT NULL DEFAULT FALSE",
+        "CREATE INDEX IF NOT EXISTS idx_notices_software_related ON procurement_notices (is_software_related)",
+        "CREATE INDEX IF NOT EXISTS idx_notices_software_category ON procurement_notices (software_product_category)",
     ]
     with db() as conn:
         with conn.cursor() as cur:
@@ -1836,19 +2265,596 @@ def import_bidders_from_notice(notice_id: str = Query(None), fetch_detail: bool 
     }
 
 
+@app.get("/api/borrowers")
+def list_borrowers(
+    search:    Optional[str] = Query(None, description="Search by borrower name"),
+    country:   Optional[str] = Query(None, description="Filter by country"),
+    notice_type: Optional[str] = Query(None, description="Filter by notice type"),
+    page:      int           = Query(1, ge=1),
+    page_size: int           = Query(25, le=100),
+):
+    filters = ["borrower IS NOT NULL AND TRIM(borrower) <> ''"]
+    params = []
+
+    if search:
+        filters.append("borrower ILIKE %s")
+        params.append(f"%{search}%")
+    if country:
+        filters.append("country = %s")
+        params.append(country)
+    if notice_type:
+        filters.append("""(
+            notice_type = %s OR
+            notice_type ILIKE %s OR
+            notice_type ILIKE %s
+        )""")
+        full = {
+            "IFB":  "%Invitation for Bids%",
+            "REOI": "%Expression of Interest%",
+            "Contract Award": "%Contract Award%",
+            "Award": "%Contract Award%",
+        }
+        params.append(notice_type)
+        params.append(full.get(notice_type, f"%{notice_type}%"))
+        params.append(f"%{notice_type}%")
+
+    where = " AND ".join(filters)
+
+    offset = (page - 1) * page_size
+
+    rows = q(f"""
+        SELECT
+            borrower,
+            country,
+            COUNT(*)                                                     AS total_notices,
+            COUNT(*) FILTER (WHERE notice_type = 'IFB')                  AS ifb_count,
+            COUNT(*) FILTER (WHERE notice_type = 'REOI')                 AS reoi_count,
+            COUNT(*) FILTER (WHERE notice_type IN ('Award','Contract Award')) AS award_count,
+            MIN(notice_date)::text                                       AS first_notice_date,
+            MAX(notice_date)::text                                       AS last_notice_date,
+            COUNT(*) FILTER (WHERE notice_date >= CURRENT_DATE - INTERVAL '30 days') AS recent_30d
+        FROM procurement_notices
+        WHERE {where}
+        GROUP BY borrower, country
+        ORDER BY total_notices DESC, borrower ASC
+        LIMIT %s OFFSET %s
+    """, params + [page_size, offset])
+
+    total = len(rows)
+    if total == page_size:
+        total = q(f"""
+            SELECT COUNT(*) AS cnt FROM (
+                SELECT 1 FROM procurement_notices
+                WHERE {where}
+                GROUP BY borrower, country
+            ) sub
+        """, params)[0]["cnt"]
+
+    output = []
+    for row in rows:
+        item = dict(row)
+        item["total_notices"] = int(item["total_notices"])
+        item["ifb_count"] = int(item["ifb_count"])
+        item["reoi_count"] = int(item["reoi_count"])
+        item["award_count"] = int(item["award_count"])
+        item["recent_30d"] = int(item["recent_30d"])
+        output.append(item)
+
+    available_countries = [r["country"] for r in q("""
+        SELECT DISTINCT country FROM procurement_notices
+        WHERE country IS NOT NULL AND TRIM(country) <> ''
+        ORDER BY country
+    """)]
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "data": output,
+        "available_countries": available_countries,
+    }
+
+
+class SoftwareClassificationReview(BaseModel):
+    is_software_related: bool
+    work_type: str = "other"
+    product_category: Optional[str] = None
+    product_name: Optional[str] = None
+    confidence: str = "medium"
+    reason: Optional[str] = None
+
+
+@app.post("/api/software-opportunities/{notice_id}/classify")
+def classify_software_opportunity(notice_id: str):
+    """Use the full notice context to classify one product opportunity."""
+    ensure_software_intelligence_schema()
+    rows = q("SELECT * FROM procurement_notices WHERE id = %s", [notice_id])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Notice not found")
+    try:
+        result = classify_software_opportunity_with_gemini(dict(rows[0]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Classification provider failed: {exc}")
+    save_software_classification(notice_id, result)
+    return {"notice_id": notice_id, **result, "source": "gemini"}
+
+
+@app.post("/api/software-opportunities/classify-pending")
+def classify_pending_software_opportunities(limit: int = Query(10, ge=1, le=25)):
+    """Classify a small queued batch, keeping external AI work bounded and auditable."""
+    ensure_software_intelligence_schema()
+    # Existing tech signals are used only to prioritize expensive AI work. They
+    # never decide the outcome and notices without those signals remain queued.
+    tech_condition, tech_params = build_tech_notice_condition("pn")
+    notices = q(f"""
+        SELECT * FROM procurement_notices pn
+        WHERE pn.is_software_related IS NULL
+        ORDER BY CASE WHEN {tech_condition} THEN 0 ELSE 1 END,
+                 pn.notice_date DESC NULLS LAST, pn.fetched_at DESC NULLS LAST
+        LIMIT %s
+    """, tech_params + [limit])
+    completed, failed = [], []
+    for notice in notices:
+        try:
+            result = classify_software_opportunity_with_gemini(dict(notice))
+            save_software_classification(notice["id"], result)
+            completed.append({"notice_id": notice["id"], "is_software_related": result["is_software_related"]})
+        except Exception as exc:
+            failed.append({"notice_id": notice["id"], "error": str(exc)})
+    return {"requested": len(notices), "classified": completed, "failed": failed}
+
+
+@app.put("/api/software-opportunities/{notice_id}/review")
+def review_software_opportunity(notice_id: str, body: SoftwareClassificationReview):
+    """Allow a reviewer to correct an AI classification and preserve the decision."""
+    ensure_software_intelligence_schema()
+    result = body.model_dump()
+    if result["work_type"] not in {"new_build", "enhancement", "integration", "implementation", "support", "other"}:
+        raise HTTPException(status_code=422, detail="Invalid work_type")
+    if result["confidence"] not in {"high", "medium", "low"}:
+        raise HTTPException(status_code=422, detail="Invalid confidence")
+    if not result["is_software_related"]:
+        result.update({"work_type": "other", "product_category": None, "product_name": None})
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE procurement_notices
+                SET is_software_related = %s, software_work_type = %s,
+                    software_product_category = %s, software_product_name = %s,
+                    software_confidence = %s, software_reason = %s,
+                    software_classification_source = 'human', software_classified_at = NOW(),
+                    software_reviewed = TRUE
+                WHERE id = %s RETURNING id
+            """, [result["is_software_related"], result["work_type"], result["product_category"],
+                  result["product_name"], result["confidence"], result["reason"], notice_id])
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Notice not found")
+    return {"status": "ok", "notice_id": notice_id, **result, "source": "human"}
+
+
+@app.get("/api/software-opportunities")
+def get_software_opportunities(
+    country: Optional[str] = Query(None),
+    product_category: Optional[str] = Query(None),
+    min_confidence: Optional[str] = Query(None, regex="^(high|medium|low)$"),
+    unreviewed_only: bool = Query(False),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+):
+    """Rank confirmed software opportunities by historic product demand."""
+    ensure_software_intelligence_schema()
+    filters = ["pn.is_software_related IS TRUE"]
+    params: List[Any] = []
+    if country:
+        filters.append("pn.country = %s")
+        params.append(country)
+    if product_category:
+        filters.append("pn.software_product_category ILIKE %s")
+        params.append(f"%{product_category}%")
+    if min_confidence:
+        levels = {"high": ["high"], "medium": ["high", "medium"], "low": ["high", "medium", "low"]}
+        filters.append("pn.software_confidence = ANY(%s)")
+        params.append(levels[min_confidence])
+    if unreviewed_only:
+        filters.append("pn.software_reviewed IS FALSE")
+    where = " AND ".join(filters)
+    offset = (page - 1) * page_size
+    rows = q(f"""
+        SELECT pn.id, pn.title, pn.country, pn.notice_type, pn.status, pn.notice_date::text,
+               pn.submission_date::text, pn.url, pn.software_work_type,
+               pn.software_product_category, pn.software_product_name,
+               pn.software_confidence, pn.software_reason, pn.software_reviewed,
+               COUNT(DISTINCT COALESCE(NULLIF(related.borrower_bid_reference, ''), related.id))
+                   FILTER (WHERE related.is_software_related IS TRUE) AS category_demand_count,
+               STRING_AGG(DISTINCT related.country, ', ' ORDER BY related.country)
+                   FILTER (WHERE related.is_software_related IS TRUE AND related.country IS NOT NULL) AS demand_countries
+        FROM procurement_notices pn
+        LEFT JOIN procurement_notices related
+          ON related.is_software_related IS TRUE
+         AND related.software_product_category = pn.software_product_category
+        WHERE {where}
+        GROUP BY pn.id
+        ORDER BY category_demand_count DESC, pn.notice_date DESC NULLS LAST
+        LIMIT %s OFFSET %s
+    """, params + [page_size, offset])
+    total = q(f"SELECT COUNT(*) AS cnt FROM procurement_notices pn WHERE {where}", params)[0]["cnt"]
+    categories = q("""
+        SELECT software_product_category AS category, COUNT(*) AS demand_count
+        FROM procurement_notices
+        WHERE is_software_related IS TRUE AND software_product_category IS NOT NULL
+        GROUP BY software_product_category
+        ORDER BY demand_count DESC, software_product_category
+        LIMIT 100
+    """)
+    return {"total": total, "page": page, "page_size": page_size,
+            "data": [dict(row) for row in rows], "categories": [dict(row) for row in categories]}
+
+
+@app.get("/api/software-opportunities/export")
+def export_software_opportunities(
+    country: Optional[str] = Query(None),
+    product_category: Optional[str] = Query(None),
+):
+    """Export ranked software opportunities plus their historical demand trail."""
+    ensure_software_intelligence_schema()
+    filters = ["pn.is_software_related IS TRUE"]
+    params: List[Any] = []
+    if country:
+        filters.append("pn.country = %s")
+        params.append(country)
+    if product_category:
+        filters.append("pn.software_product_category ILIKE %s")
+        params.append(f"%{product_category}%")
+    where = " AND ".join(filters)
+    rows = q(f"""
+        SELECT pn.id, pn.title, pn.country, pn.notice_type, pn.status, pn.notice_date::text,
+               pn.submission_date::text, pn.url, pn.software_work_type,
+               pn.software_product_category, pn.software_product_name,
+               pn.software_confidence, pn.software_reason,
+               COUNT(DISTINCT COALESCE(NULLIF(related.borrower_bid_reference, ''), related.id))
+                   FILTER (WHERE related.is_software_related IS TRUE) AS demand_count,
+               STRING_AGG(DISTINCT related.country, ', ' ORDER BY related.country)
+                   FILTER (WHERE related.is_software_related IS TRUE AND related.country IS NOT NULL) AS demand_countries,
+               MIN(related.notice_date)::text FILTER (WHERE related.is_software_related IS TRUE) AS first_seen,
+               MAX(related.notice_date)::text FILTER (WHERE related.is_software_related IS TRUE) AS last_seen
+        FROM procurement_notices pn
+        LEFT JOIN procurement_notices related
+          ON related.is_software_related IS TRUE
+         AND related.software_product_category = pn.software_product_category
+        WHERE {where}
+        GROUP BY pn.id
+        ORDER BY demand_count DESC, pn.notice_date DESC NULLS LAST
+    """, params)
+    history_where = where.replace("pn.", "base_notice.")
+    history = q(f"""
+        SELECT base_notice.id AS opportunity_id, base_notice.title AS opportunity_title,
+               base_notice.software_product_category, historical.id AS historical_notice_id,
+               historical.title AS historical_title, historical.country,
+               historical.notice_type, historical.status, historical.notice_date::text,
+               historical.url, historical.borrower_bid_reference
+        FROM procurement_notices base_notice
+        JOIN procurement_notices historical
+          ON historical.is_software_related IS TRUE
+         AND historical.software_product_category = base_notice.software_product_category
+        WHERE {history_where}
+        ORDER BY current.software_product_category, historical.notice_date DESC NULLS LAST
+    """, params)
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Ranked Opportunities"
+    columns = [
+        ("Opportunity", "title"), ("Product category", "software_product_category"),
+        ("Product name", "software_product_name"), ("Work type", "software_work_type"),
+        ("Demand count", "demand_count"), ("Countries requested in", "demand_countries"),
+        ("First seen", "first_seen"), ("Last seen", "last_seen"), ("Country", "country"),
+        ("Notice date", "notice_date"), ("Confidence", "software_confidence"),
+        ("Why classified", "software_reason"), ("Source URL", "url"),
+    ]
+    sheet.append([label for label, _ in columns])
+    for row in rows:
+        sheet.append([row.get(key) for _, key in columns])
+    history_sheet = workbook.create_sheet("Demand History")
+    history_columns = [
+        ("Opportunity", "opportunity_title"), ("Product category", "software_product_category"),
+        ("Historical tender", "historical_title"), ("Country", "country"),
+        ("Notice type", "notice_type"), ("Status", "status"), ("Notice date", "notice_date"),
+        ("Reference", "borrower_bid_reference"), ("Source URL", "url"),
+    ]
+    history_sheet.append([label for label, _ in history_columns])
+    for row in history:
+        history_sheet.append([row.get(key) for _, key in history_columns])
+    for ws in (sheet, history_sheet):
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+        for column in ws.columns:
+            letter = get_column_letter(column[0].column)
+            ws.column_dimensions[letter].width = min(max(max(len(str(cell.value or "")) for cell in column) + 2, 12), 55)
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    return StreamingResponse(output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="Software_Opportunity_Demand_{timestamp}.xlsx"'})
+
+
+@app.get("/api/borrowers/export")
+def export_borrowers(
+    search:      Optional[str] = Query(None),
+    country:     Optional[str] = Query(None),
+    notice_type: Optional[str] = Query(None),
+    fields:      Optional[str] = Query(None),
+    format:      str           = Query("xlsx", regex="^(xlsx|csv)$"),
+):
+    selected_fields = resolve_borrower_export_fields(fields)
+    rows = fetch_borrower_export_rows(search, country, notice_type)
+
+    if format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        headers = [BORROWER_EXPORT_FIELD_CONFIG[f][0] for f in selected_fields]
+        writer.writerow(headers)
+        for row in rows:
+            writer.writerow([row.get(BORROWER_EXPORT_FIELD_CONFIG[f][1]) for f in selected_fields])
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+        return StreamingResponse(
+            io.BytesIO(output.getvalue().encode("utf-8-sig")),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="WB_Borrowers_{timestamp}.csv"'}
+        )
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Borrowers"
+
+    header_fill = PatternFill("solid", fgColor="2C3E50")
+    header_font = Font(bold=True, color="FFFFFF", size=12, name="Calibri")
+    header_border = Border(
+        left=Side(style="thin", color="34495E"),
+        right=Side(style="thin", color="34495E"),
+        top=Side(style="medium", color="3498DB"),
+        bottom=Side(style="medium", color="3498DB")
+    )
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    data_font = Font(size=11, name="Calibri")
+    border_all = Border(
+        left=Side(style="thin", color="BDC3C7"),
+        right=Side(style="thin", color="BDC3C7"),
+        top=Side(style="thin", color="BDC3C7"),
+        bottom=Side(style="thin", color="BDC3C7")
+    )
+    center_align = Alignment(horizontal="center", vertical="center")
+
+    COLUMNS = [BORROWER_EXPORT_FIELD_CONFIG[f] for f in selected_fields]
+
+    for col_idx, (label, _, width) in enumerate(COLUMNS, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+        cell = ws.cell(row=1, column=col_idx, value=label)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = header_border
+        cell.alignment = header_align
+
+    ws.row_dimensions[1].height = 35
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}1"
+    ws.sheet_view.zoomScale = 85
+
+    for row_idx, row in enumerate(rows, 2):
+        ws.row_dimensions[row_idx].height = 22
+        for col_idx, (_, key, _) in enumerate(COLUMNS, 1):
+            val = row.get(key)
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = data_font
+            cell.border = border_all
+            cell.alignment = center_align if key in ("total_notices", "ifb_count", "reoi_count", "award_count", "recent_30d") else Alignment(horizontal="left", vertical="center")
+            if key in ("first_notice_date", "last_notice_date") and val:
+                try:
+                    if isinstance(val, str) and len(val) >= 10:
+                        cell.value = datetime.strptime(val[:10], "%Y-%m-%d").date()
+                        cell.alignment = center_align
+                except Exception:
+                    pass
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="WB_Borrowers_{timestamp}.xlsx"'}
+    )
+
+
+@app.get("/api/borrowers/export/qualified")
+def export_qualified_borrowers(
+    min_awards: int = Query(3, ge=1),
+    tech_only:   bool = Query(False, description="Only tech-related awarded notices"),
+):
+    """Export qualified host institutions (>=N awarded tenders) as a per-country workbook.
+    Each row is an awarded notice showing Project ID, Reference Number, and other details."""
+
+    tech_notice_filter, tech_notice_params = build_tech_notice_condition("pn")
+    tech_where = f"AND {tech_notice_filter}" if tech_only else ""
+    tech_params = tech_notice_params if tech_only else []
+
+    notices = q(f"""
+        SELECT DISTINCT
+            pn.borrower           AS host_institution,
+            pn.country,
+            pn.project_id,
+            COALESCE(NULLIF(pn.borrower_bid_reference, ''), NULLIF(pn.notice_no, ''), pn.id) AS reference_number,
+            pn.title,
+            pn.notice_date::text,
+            pn.notice_type,
+            pn.status,
+            pn.contract_amount,
+            pn.currency,
+            pn.url,
+            pn.description
+        FROM procurement_notices pn
+        WHERE pn.notice_type IN ('Award', 'Contract Award')
+          AND pn.borrower IS NOT NULL
+          AND TRIM(pn.borrower) <> ''
+          {tech_where}
+          AND (pn.borrower, pn.country) IN (
+              SELECT borrower, country
+              FROM procurement_notices
+              WHERE notice_type IN ('Award', 'Contract Award')
+                AND borrower IS NOT NULL
+                AND TRIM(borrower) <> ''
+              GROUP BY borrower, country
+              HAVING COUNT(*) >= %s
+          )
+        ORDER BY country, host_institution, notice_date DESC NULLS LAST
+    """, tech_params + [min_awards])
+
+    if not notices:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "No Data"
+        ws.cell(row=1, column=1, value="No qualifying institutions found")
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="Qualified_Institutions_{timestamp}.xlsx"'}
+        )
+
+    countries_order = []
+    rows_by_country: Dict[str, List[Dict[str, Any]]] = {}
+    for row in notices:
+        ref = row.get("reference_number") or ""
+        if ref.startswith("OP") or ref.startswith("PN") or ref.startswith("00"):
+            desc = row.get("description") or ""
+            m = re.search(r'(?:Bid/Contract\s+)?Reference\s+No\.?\s*[:\s]\s*\n?\s*(.+)', desc)
+            if m:
+                extracted = m.group(1).strip()
+                if extracted and not extracted.startswith("0") and len(extracted) < 60:
+                    row["reference_number"] = extracted
+        c = row.get("country") or "Unknown"
+        rows_by_country.setdefault(c, []).append(row)
+        if c not in countries_order:
+            countries_order.append(c)
+
+    wb = openpyxl.Workbook()
+    default_sheet = wb.active
+    wb.remove(default_sheet)
+
+    header_fill   = PatternFill("solid", fgColor="1B5E20")
+    header_font   = Font(bold=True, color="FFFFFF", size=11, name="Calibri")
+    header_border = Border(
+        left=Side(style="thin", color="2E7D32"),
+        right=Side(style="thin", color="2E7D32"),
+        top=Side(style="medium", color="43A047"),
+        bottom=Side(style="medium", color="43A047"),
+    )
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    data_font    = Font(size=10, name="Calibri")
+    link_font    = Font(color="1565C0", underline="single", size=10, name="Calibri")
+    border_all   = Border(
+        left=Side(style="thin", color="C8E6C9"),
+        right=Side(style="thin", color="C8E6C9"),
+        top=Side(style="thin", color="C8E6C9"),
+        bottom=Side(style="thin", color="C8E6C9"),
+    )
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align   = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    COLUMNS = [
+        ("Host Institution",   "host_institution",   45),
+        ("Tender Name",        "title",              55),
+        ("Project ID",         "project_id",         22),
+        ("Reference No.",      "reference_number",   30),
+    ]
+
+    used_titles = set()
+    for country in countries_order:
+        country_rows = rows_by_country[country]
+        base_title = _safe_sheet_title(country, country)
+        title = base_title
+        suffix = 2
+        while title.lower() in used_titles:
+            tail = f" {suffix}"
+            title = f"{base_title[:31 - len(tail)]}{tail}"
+            suffix += 1
+        used_titles.add(title.lower())
+
+        ws = wb.create_sheet(title)
+
+        ws.row_dimensions[1].height = 32
+        for col_idx, (label, _, width) in enumerate(COLUMNS, 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+            cell = ws.cell(row=1, column=col_idx, value=label)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = header_border
+            cell.alignment = header_align
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}1"
+        ws.sheet_view.zoomScale = 90
+
+        for row_idx, row in enumerate(country_rows, 2):
+            ws.row_dimensions[row_idx].height = 22
+            for col_idx, (_, key, _) in enumerate(COLUMNS, 1):
+                val = row.get(key)
+                cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = data_font
+                cell.border = border_all
+                cell.alignment = left_align
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    tech_tag = "_Tech" if tech_only else ""
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="Qualified_Institutions{tech_tag}_{timestamp}.xlsx"'}
+    )
+
+
 @app.get("/api/bidders")
 def list_bidders(
     qs:       Optional[str] = Query(None,  description="Search by name (legacy param)"),
     search:   Optional[str] = Query(None,  description="Search by name or org"),
     country:  Optional[str] = Query(None,  description="Filter by country"),
     won_only: bool          = Query(False, description="Only bidders who won at least one award"),
+    tech_only: bool         = Query(False, description="Only tech-related bidders"),
     page:     int           = Query(1,  ge=1),
     page_size:int           = Query(25, ge=1, le=200),
+    sort_by:  str           = Query("bid_count", regex="^(bid_count|won_count|total_bid_amount|last_bid_date|name)$"),
+    sort_order: str         = Query("desc", regex="^(asc|desc)$"),
 ):
     """List bidders with aggregated bid stats."""
-    where, params = build_bidder_filters(search, qs, country)
+    where, params = build_bidder_filters(search, qs, country, tech_only)
     having = "HAVING COUNT(CASE WHEN ba.won THEN 1 END) > 0" if won_only else ""
     offset = (page - 1) * page_size
+    sort_exprs = {
+        "bid_count": "bid_count",
+        "won_count": "won_count",
+        "total_bid_amount": "total_bid_amount",
+        "last_bid_date": "last_bid_date",
+        "name": "LOWER(b.name)",
+    }
+    order_dir = "ASC" if sort_order == "asc" else "DESC"
+    nulls = "NULLS FIRST" if order_dir == "ASC" else "NULLS LAST"
+    order_expr = sort_exprs[sort_by]
+    tie_breaker = "bid_count DESC, b.name ASC" if sort_by != "name" else "bid_count DESC"
+    tech_notice_filter, tech_notice_params = build_tech_notice_condition("pn")
 
     rows = q(f"""
         SELECT
@@ -1870,6 +2876,11 @@ def list_bidders(
             COALESCE(SUM(ba.award_amount), 0)         AS total_bid_amount,
             MAX(NULLIF(ba.currency, ''))              AS primary_currency,
             MAX(ba.award_date)::text                  AS last_bid_date,
+            (SELECT COUNT(DISTINCT pn.id)
+             FROM bidder_awards ba3
+             JOIN procurement_notices pn ON pn.id = ba3.notice_id
+             WHERE ba3.bidder_id = b.id
+               AND {tech_notice_filter})              AS tech_notice_count,
             (SELECT pn.title
              FROM bidder_awards ba2
              JOIN procurement_notices pn ON pn.id = ba2.notice_id
@@ -1881,12 +2892,12 @@ def list_bidders(
         WHERE {where}
         GROUP BY b.id
         {having}
-        ORDER BY bid_count DESC, b.name ASC
+        ORDER BY {order_expr} {order_dir} {nulls}, {tie_breaker}
         LIMIT %s OFFSET %s
-    """, params + [page_size, offset])
+    """, tech_notice_params + params + [page_size, offset])
 
     for row in rows:
-        row["is_tech"] = looks_like_tech_bidder(row)
+        row["is_tech"] = looks_like_tech_bidder(row) or int(row.get("tech_notice_count") or 0) > 0
 
     total_rows = q(f"""
         SELECT COUNT(*) AS cnt FROM (
@@ -1936,8 +2947,8 @@ def resolve_bidder_export_fields(fields: Optional[str]) -> List[str]:
     return [field for field in selected_fields if field in BIDDER_EXPORT_FIELDS]
 
 
-def fetch_bidder_export_rows(search: Optional[str], qs: Optional[str], country: Optional[str], won_only: bool):
-    where, params = build_bidder_filters(search, qs, country)
+def fetch_bidder_export_rows(search: Optional[str], qs: Optional[str], country: Optional[str], won_only: bool, tech_only: bool = False):
+    where, params = build_bidder_filters(search, qs, country, tech_only)
     having = "HAVING COUNT(CASE WHEN ba.won THEN 1 END) > 0" if won_only else ""
     return q(f"""
         SELECT
@@ -1977,10 +2988,11 @@ def export_bidders_excel(
     search: Optional[str] = Query(None),
     country: Optional[str] = Query(None),
     won_only: bool = Query(False),
+    tech_only: bool = Query(False),
     fields: Optional[str] = Query(None),
 ):
     selected_fields = resolve_bidder_export_fields(fields)
-    rows = fetch_bidder_export_rows(search, qs, country, won_only)
+    rows = fetch_bidder_export_rows(search, qs, country, won_only, tech_only)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -2016,10 +3028,11 @@ def export_bidders_csv(
     search: Optional[str] = Query(None),
     country: Optional[str] = Query(None),
     won_only: bool = Query(False),
+    tech_only: bool = Query(False),
     fields: Optional[str] = Query(None),
 ):
     selected_fields = resolve_bidder_export_fields(fields)
-    rows = fetch_bidder_export_rows(search, qs, country, won_only)
+    rows = fetch_bidder_export_rows(search, qs, country, won_only, tech_only)
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -2190,7 +3203,7 @@ def delete_bidder(bidder_id: int):
     return {"status": "ok", "deleted_id": bidder_id, "deleted_name": row["name"]}
 
 
-def build_bidder_filters(search: Optional[str], qs: Optional[str], country: Optional[str]):
+def build_bidder_filters(search: Optional[str], qs: Optional[str], country: Optional[str], tech_only: bool = False):
     search_term = search or qs
     filters = ["1=1"]
     params: List[Any] = []
@@ -2201,7 +3214,69 @@ def build_bidder_filters(search: Optional[str], qs: Optional[str], country: Opti
     if country:
         filters.append("b.country = %s")
         params.append(country)
+    if tech_only:
+        bidder_filter, bidder_params = build_tech_bidder_condition("b")
+        notice_filter, notice_params = build_tech_notice_condition("pn")
+        filters.append(f"""(
+            {bidder_filter}
+            OR EXISTS (
+                SELECT 1
+                FROM bidder_awards tech_ba
+                JOIN procurement_notices pn ON pn.id = tech_ba.notice_id
+                WHERE tech_ba.bidder_id = b.id
+                  AND {notice_filter}
+            )
+        )""")
+        params.extend(bidder_params + notice_params)
     return " AND ".join(filters), params
+
+
+def ensure_software_intelligence_schema():
+    """Create product-classification fields without modifying existing notices."""
+    statements = [
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS is_software_related BOOLEAN",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_work_type TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_product_category TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_product_name TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_confidence TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_reason TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_classification_source TEXT",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_classified_at TIMESTAMPTZ",
+        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_reviewed BOOLEAN NOT NULL DEFAULT FALSE",
+        "CREATE INDEX IF NOT EXISTS idx_notices_software_related ON procurement_notices (is_software_related)",
+        "CREATE INDEX IF NOT EXISTS idx_notices_software_category ON procurement_notices (software_product_category)",
+    ]
+    with db() as conn:
+        with conn.cursor() as cur:
+            for statement in statements:
+                cur.execute(statement)
+        conn.commit()
+
+
+def save_software_classification(notice_id: str, result: Dict[str, Any], reviewed: bool = False):
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE procurement_notices
+                SET is_software_related = %s,
+                    software_work_type = %s,
+                    software_product_category = %s,
+                    software_product_name = %s,
+                    software_confidence = %s,
+                    software_reason = %s,
+                    software_classification_source = 'gemini',
+                    software_classified_at = NOW(),
+                    software_reviewed = %s
+                WHERE id = %s
+                RETURNING id
+            """, [
+                result["is_software_related"], result["work_type"], result["product_category"],
+                result["product_name"], result["confidence"], result["reason"], reviewed, notice_id,
+            ])
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Notice not found")
 
 
 @app.get("/api/notices/{notice_id}/bidders")
@@ -2582,11 +3657,18 @@ def trigger_country_backfill(name: str, since: Optional[date] = Query(None)):
             finally:
                 conn.close()
 
+            alert_result = None
+            if success:
+                try:
+                    alert_result = sync_award_alerts()
+                except Exception as alert_error:
+                    alert_result = {"status": "error", "error": str(alert_error)}
             _fetch_status["last_result"] = {
                 "exit_code": 0 if success else 1,
                 "stdout": f"{name} backfill finished from {since}: {upserted} fetched, {new_records} new, status={country_status}",
                 "stderr": error_msg or "",
                 "success": success,
+                "award_alerts": alert_result,
             }
         except Exception as e:
             _fetch_status["last_result"] = {

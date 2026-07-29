@@ -5,6 +5,7 @@ import { Search, ExternalLink, ChevronLeft, ChevronRight, X, Download, Loader, B
 const COLORS = { IFB: '#00d4aa', REOI: '#7c6fff', 'Contract Award': '#f0a500', Award: '#f0a500' }
 const NOTICE_TYPE_OPTIONS = ['IFB', 'REOI', 'Contract Award']
 const STATUSES = ['Active', 'Awarded', 'Cancelled', 'Closed', 'Pending', 'Published']
+const PAGE_SIZE = 25
 
 function Badge({ type }) {
   return (
@@ -1252,7 +1253,7 @@ export default function Notices() {
     }
   })
 
-  const url = buildUrl('/api/notices', { ...filters, page_size: 25 })
+  const url = buildUrl('/api/notices', { ...filters, page_size: PAGE_SIZE })
   const { data, loading } = useApi(url)
 
   const set = (key, value) => {
@@ -1260,9 +1261,9 @@ export default function Notices() {
     setFilters(current => ({ ...current, [key]: value, page: 1 }))
   }
 
-  const notices = data?.data || []
+  const notices = loading ? [] : (data?.data || [])
   const total = data?.total || 0
-  const pages = Math.max(1, Math.ceil(total / 25))
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const countries = data?.available_countries || []
   const hasFilters = filters.country || filters.notice_type || filters.status || filters.search || filters.from_date || filters.to_date || filters.tech_only
 

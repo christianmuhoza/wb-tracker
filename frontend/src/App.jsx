@@ -3,11 +3,15 @@ import Overview from './views/Overview.jsx'
 import Notices from './views/Notices.jsx'
 import Settings from './views/Settings.jsx'
 import Bidders from './views/Bidders.jsx'
+import Borrowers from './views/Borrowers.jsx'
+import AwardAlerts from './views/AwardAlerts.jsx'
+import SoftwareOpportunities from './views/SoftwareOpportunities.jsx'
 
-import { Globe, FileSearch, Activity, SlidersHorizontal } from 'lucide-react'
+import { Globe, FileSearch, Activity, SlidersHorizontal, Bell, Building, Cpu } from 'lucide-react'
 
 export default function App() {
   const [view, setView] = useState('overview')
+  const [awardUnread, setAwardUnread] = useState(0)
   const [theme, setTheme] = useState(() => {
     if (typeof window === 'undefined') return 'dark'
     return window.localStorage.getItem('wb-theme') || 'dark'
@@ -17,11 +21,33 @@ export default function App() {
     document.documentElement.dataset.theme = theme
     window.localStorage.setItem('wb-theme', theme)
   }, [theme])
+  useEffect(() => {
+    let active = true
+    const loadAwardCount = async () => {
+      try {
+        const res = await fetch('/api/award-alerts?page_size=1')
+        if (!res.ok) return
+        const data = await res.json()
+        if (active) setAwardUnread(data.unread || 0)
+      } catch {
+        if (active) setAwardUnread(0)
+      }
+    }
+    loadAwardCount()
+    const interval = setInterval(loadAwardCount, 60000)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
+  }, [view])
 
   const navItems = [
     { id: 'overview', label: 'Overview', icon: Globe },
     { id: 'notices', label: 'Notices', icon: FileSearch },
+    { id: 'software', label: 'Software Intelligence', icon: Cpu },
+    { id: 'borrowers', label: 'Institutions', icon: Building },
     { id: 'bidders', label: 'Bidders', icon: Activity },
+    { id: 'awards', label: 'Award Alerts', icon: Bell, badge: awardUnread },
     { id: 'settings', label: 'Settings', icon: SlidersHorizontal },
   ]
 
@@ -66,7 +92,7 @@ export default function App() {
         </div>
 
         <div style={{ padding: '16px 12px', flex: 1 }}>
-          {navItems.map(({ id, label, icon: Icon }) => (
+          {navItems.map(({ id, label, icon: Icon, badge }) => (
             <button
               key={id}
               onClick={() => setView(id)}
@@ -81,7 +107,10 @@ export default function App() {
               }}
             >
               <Icon size={16} />
-              {label}
+              <span style={{ flex: 1, textAlign: 'left' }}>{label}</span>
+              {badge > 0 && (
+                <span style={{ minWidth: 20, height: 20, borderRadius: 999, background: 'var(--accent)', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{badge > 99 ? '99+' : badge}</span>
+              )}
             </button>
           ))}
         </div>
@@ -101,7 +130,10 @@ export default function App() {
       <main style={{ flex: 1, overflow: 'auto', background: 'var(--bg)' }}>
         {view === 'overview' && <Overview />}
         {view === 'notices' && <Notices />}
+        {view === 'software' && <SoftwareOpportunities />}
+        {view === 'borrowers' && <Borrowers />}
         {view === 'bidders' && <Bidders />}
+        {view === 'awards' && <AwardAlerts />}
         {view === 'settings' && <Settings />}
       </main>
     </div>

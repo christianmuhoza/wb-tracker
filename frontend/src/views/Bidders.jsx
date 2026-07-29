@@ -141,6 +141,7 @@ function BidderExportButton({ filters, total }) {
       if (filters.search) params.set('search', filters.search)
       if (filters.country) params.set('country', filters.country)
       if (filters.won_only) params.set('won_only', 'true')
+      if (filters.tech_only) params.set('tech_only', 'true')
       params.set('fields', selectedFields.join(','))
       const endpoint = exportType === 'csv' ? '/api/bidders/export/csv' : '/api/bidders/export'
       const res = await fetch(`${endpoint}?${params.toString()}`)
@@ -747,6 +748,8 @@ export default function Bidders() {
   const [country, setCountry] = useState('')
   const [wonOnly, setWonOnly] = useState(false)
   const [techOnly, setTechOnly] = useState(false)
+  const [sortBy, setSortBy] = useState('bid_count')
+  const [sortOrder, setSortOrder] = useState('desc')
   const [selected, setSelected] = useState(null)
   const [importStatus, setImportStatus] = useState(null)
   const [finishingImport, setFinishingImport] = useState(false)
@@ -761,6 +764,9 @@ export default function Bidders() {
       if (search) params.set('search', search)
       if (country) params.set('country', country)
       if (wonOnly) params.set('won_only', 'true')
+      if (techOnly) params.set('tech_only', 'true')
+      params.set('sort_by', sortBy)
+      params.set('sort_order', sortOrder)
       const res = await fetch(`/api/bidders?${params}`)
       const json = await res.json()
       if (Array.isArray(json)) {
@@ -778,20 +784,19 @@ export default function Bidders() {
     } finally {
       setLoading(false)
     }
-  }, [page, search, country, wonOnly])
+  }, [page, search, country, wonOnly, techOnly, sortBy, sortOrder])
 
   const filteredData = useMemo(() => {
-    if (!techOnly) return data
-    return data.filter(b => b.is_tech)
-  }, [data, techOnly])
+    return data
+  }, [data])
 
   useEffect(() => { fetchBidders() }, [fetchBidders])
-  useEffect(() => { setPage(1) }, [search, country, wonOnly, techOnly])
+  useEffect(() => { setPage(1) }, [search, country, wonOnly, techOnly, sortBy, sortOrder])
 
   useEffect(() => {
-    fetch('/api/bidders/countries')
+    fetch('/api/settings/countries')
       .then(res => res.ok ? res.json() : [])
-      .then(json => setCountryOptions(Array.isArray(json) ? json : []))
+      .then(json => setCountryOptions(Array.isArray(json) ? json.map(item => item.name).filter(Boolean) : []))
       .catch(() => setCountryOptions([]))
   }, [])
 
@@ -931,7 +936,7 @@ export default function Bidders() {
           <button onClick={importAll} disabled={importing} style={btnStyle(false, false)}>
             {importing ? 'Importing...' : 'Import All Awards'}
           </button>
-          <BidderExportButton filters={{ search, country, won_only: wonOnly }} total={total} />
+          <BidderExportButton filters={{ search, country, won_only: wonOnly, tech_only: techOnly }} total={total} />
         </div>
       </div>
 
@@ -992,7 +997,7 @@ export default function Bidders() {
           value={country}
           onChange={e => setCountry(e.target.value)}
         >
-          <option value="">All bidder countries</option>
+          <option value="">All tracked countries</option>
           {countryOptions.map(option => (
             <option key={option} value={option}>{option}</option>
           ))}
@@ -1008,8 +1013,23 @@ export default function Bidders() {
         }}>
           <Cpu size={13} style={{ marginRight: 4 }} />{techOnly ? 'Tech only' : 'Tech'}
         </button>
+        <select
+          style={{ ...inputStyle, minWidth: 170, flex: '0 1 190px' }}
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value)}
+          title="Sort bidders"
+        >
+          <option value="bid_count">Most Bids</option>
+          <option value="won_count">Most Projects Won</option>
+          <option value="total_bid_amount">Highest Award Value</option>
+          <option value="last_bid_date">Latest Bid</option>
+          <option value="name">Company Name</option>
+        </select>
+        <button onClick={() => setSortOrder(current => current === 'desc' ? 'asc' : 'desc')} style={btnStyle(false)}>
+          {sortOrder === 'desc' ? 'High to Low' : 'Low to High'}
+        </button>
         <button
-          onClick={() => { setSearch(''); setCountry(''); setWonOnly(false); setTechOnly(false); setPage(1) }}
+          onClick={() => { setSearch(''); setCountry(''); setWonOnly(false); setTechOnly(false); setSortBy('bid_count'); setSortOrder('desc'); setPage(1) }}
           style={{ ...btnStyle(false), color: 'var(--text3)' }}
         >
           Reset

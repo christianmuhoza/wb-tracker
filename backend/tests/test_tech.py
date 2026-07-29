@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from services.tech import (
     classify_notice_tech, looks_like_tech_bidder,
-    build_tech_notice_condition, TECH_NOTICE_KEYWORDS,
+    build_tech_notice_condition, build_tech_bidder_condition, TECH_NOTICE_KEYWORDS,
 )
 
 
@@ -84,6 +84,76 @@ class TestClassifyNoticeTech(unittest.TestCase):
         self.assertTrue(result["is_tech"])
         self.assertIn("Digital Services", result["tech_category"])
 
+    def test_ai_emerging_tech_detected(self):
+        result = classify_notice_tech({
+            "title": "AI-powered predictive analytics platform",
+            "description": "Machine learning model for data science",
+            "project_name": "",
+            "procurement_method": "",
+            "borrower_bid_reference": "",
+        })
+        self.assertTrue(result["is_tech"])
+        categories = result["tech_category"].split(", ")
+        self.assertIn("AI & Emerging Tech", categories)
+
+    def test_system_integration_detected(self):
+        result = classify_notice_tech({
+            "title": "ERP system integration for public finance",
+            "description": "",
+            "project_name": "",
+            "procurement_method": "",
+            "borrower_bid_reference": "",
+        })
+        self.assertTrue(result["is_tech"])
+        self.assertIn("Software / Platforms", result["tech_category"])
+
+    def test_cybersecurity_expanded_detected(self):
+        result = classify_notice_tech({
+            "title": "Penetration testing and vulnerability assessment",
+            "description": "Network security and endpoint protection",
+            "project_name": "",
+            "procurement_method": "",
+            "borrower_bid_reference": "",
+        })
+        self.assertTrue(result["is_tech"])
+        self.assertIn("Cybersecurity / Data", result["tech_category"])
+
+    def test_medical_equipment_is_not_ict_equipment(self):
+        result = classify_notice_tech({
+            "title": "Procurement of medical equipments for six Veterinary clinics",
+            "description": "Veterinary medicines and equipment wholesale",
+            "project_name": "Lowlands Livelihood Resilience Project",
+            "procurement_method": "Request for Quotations",
+            "borrower_bid_reference": "ET-AFAR, LLRP-503414-GO-RFQ",
+        })
+        self.assertFalse(result["is_tech"])
+
+    def test_epidemiology_training_program_is_not_tech(self):
+        result = classify_notice_tech({
+            "title": "Hire an international firm to guide and lead the process of establishing the Advanced Field Epidemiology Training Programs (FELTP).",
+            "description": "",
+            "project_name": "",
+            "procurement_method": "",
+            "borrower_bid_reference": "",
+        })
+        self.assertFalse(result["is_tech"])
+
+    def test_concrete_platform_is_not_software_platform(self):
+        result = classify_notice_tech({
+            "title": "Construction of Concrete platform for incinerator Bansang RHD",
+            "description": "Scope of Contract Construction of Concrete Platform for Incinerator Bansang Central River Region",
+            "project_name": "The Gambia COVID-19 Preparedness and Response Project",
+            "procurement_method": "Request for Quotations",
+            "borrower_bid_reference": "GM-MOH-270567-CW-RFQ",
+        })
+        self.assertFalse(result["is_tech"])
+
+    def test_project_unit_does_not_match_bare_it(self):
+        condition, params = build_tech_notice_condition()
+        self.assertEqual(len(params), 1)
+        self.assertNotIn("|it|", params[0])
+        self.assertIn("~*", condition)
+
 
 class TestLooksLikeTechBidder(unittest.TestCase):
 
@@ -99,6 +169,26 @@ class TestLooksLikeTechBidder(unittest.TestCase):
         row = {"name": "Integrated Systems Corp", "contact_org": "", "category": ""}
         self.assertTrue(looks_like_tech_bidder(row))
 
+    def test_cloud_company(self):
+        row = {"name": "Cloud Infrastructure Ltd", "contact_org": "", "category": ""}
+        self.assertTrue(looks_like_tech_bidder(row))
+
+    def test_analytics_company(self):
+        row = {"name": "Data Analytics Solutions", "contact_org": "", "category": ""}
+        self.assertTrue(looks_like_tech_bidder(row))
+
+    def test_managed_services_company(self):
+        row = {"name": "Managed Services Provider Inc", "contact_org": "", "category": ""}
+        self.assertTrue(looks_like_tech_bidder(row))
+
+    def test_bidder_sql_filter_uses_alias(self):
+        condition, params = build_tech_bidder_condition("b")
+        self.assertIn("b.name", condition)
+        self.assertIn("b.core_products", condition)
+        self.assertIn("~*", condition)
+        self.assertEqual(len(params), 1)
+        self.assertIn("software", params[0])
+
 
 class TestBuildTechNoticeCondition(unittest.TestCase):
 
@@ -110,8 +200,8 @@ class TestBuildTechNoticeCondition(unittest.TestCase):
 
     def test_contains_keywords_in_params(self):
         _, params = build_tech_notice_condition()
-        self.assertIn("%software%", params)
-        self.assertIn("%ict%", params)
+        self.assertIn("software", params[0])
+        self.assertIn("ict", params[0])
 
     def test_with_alias(self):
         condition, _ = build_tech_notice_condition("n")
