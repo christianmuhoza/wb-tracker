@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useApi } from '../hooks/useApi.js'
-import { Save, Plus, Trash2, RefreshCw, RotateCcw } from 'lucide-react'
+import { Save, Plus, Trash2, RefreshCw, RotateCcw, Upload, Search, ListRestart } from 'lucide-react'
 
 function Section({ title, children }) {
   return (
@@ -20,7 +20,26 @@ export default function Settings() {
   const { data: countryStatuses, loading: statusesLoading } = useApi(`/api/fetch/countries?t=${refreshKey}`, [refreshKey])
   const [form, setForm] = useState({ baseline_date: '', country_batch: '', request_delay: '', auto_sync_hour: '' })
   const [newCountry, setNewCountry] = useState('')
+  const [bulkCountries, setBulkCountries] = useState('')
+  const [countryFilter, setCountryFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [coverageFilter, setCoverageFilter] = useState('')
+  const [running, setRunning] = useState(false)
   const [message, setMessage] = useState('')
+
+  const filteredCountries = useMemo(() => {
+    const q = countryFilter.trim().toLowerCase()
+    if (!q) return countries || []
+    return (countries || []).filter(c => c.name.toLowerCase().includes(q))
+  }, [countries, countryFilter])
+
+  const filteredStatuses = useMemo(() => {
+    const q = coverageFilter.trim().toLowerCase()
+    let rows = countryStatuses || []
+    if (statusFilter) rows = rows.filter(c => (c.status || 'not_started') === statusFilter)
+    if (q) rows = rows.filter(c => (c.country || '').toLowerCase().includes(q) || (c.explanation || '').toLowerCase().includes(q))
+    return rows
+  }, [countryStatuses, coverageFilter, statusFilter])
 
   const saveSettings = async () => {
     const payload = {
@@ -50,6 +69,24 @@ export default function Settings() {
     setRefreshKey(k => k + 1)
   }
 
+  const addBulkCountries = async () => {
+    const names = bulkCountries.split(/[\n,;]/).map(n => n.trim()).filter(Boolean)
+    if (!names.length) return
+    const res = await fetch('/api/settings/countries/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names }),
+    })
+    if (res.ok) {
+      const data = await res.json()
+      setMessage(`${data.added.length} country(ies) added${data.skipped.length ? `, ${data.skipped.length} skipped (already present)` : ''}.`)
+    } else {
+      setMessage('Could not add countries.')
+    }
+    setBulkCountries('')
+    setRefreshKey(k => k + 1)
+  }
+
   const removeCountry = async (name) => {
     const res = await fetch(`/api/settings/countries/${encodeURIComponent(name)}`, { method: 'DELETE' })
     setMessage(res.ok ? `${name} removed.` : `Could not remove ${name}.`)
@@ -61,8 +98,26 @@ export default function Settings() {
   const backfillCountry = async (name) => {
     const since = form.baseline_date || general?.baseline_date || defaultDate()
     const res = await fetch(`/api/fetch/backfill/${encodeURIComponent(name)}?since=${encodeURIComponent(since)}`, { method: 'POST' })
-    setMessage(res.ok ? `${name} backfill started from ${since}. Refresh in a moment.` : `Could not start ${name} backfill.`)
+    const data = await res.json().catch(() => ({}))
+    setMessage(res.ok
+      ? `${name}: notices backfill started from ${since}. Bidders + award alerts are processed automatically after it finishes.`
+      : `Could not start ${name} backfill: ${data.message || ''}`)
     setRefreshKey(k => k + 1)
+  }
+
+  const backfillAllCountries = async () => {
+    const since = form.baseline_date || general?.baseline_date || defaultDate()
+    setRunning(true)
+    try {
+      const res = await fetch(`/api/fetch/backfill_all?since=${encodeURIComponent(since)}`, { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      setMessage(res.ok
+        ? `Full backfill started for all countries from ${since}. Notices → bidders → award alerts run in the background.`
+        : `Could not start full backfill: ${data.message || ''}`)
+    } finally {
+      setRunning(false)
+      setRefreshKey(k => k + 1)
+    }
   }
 
   const statusColor = (status) => ({
@@ -126,30 +181,78 @@ export default function Settings() {
               Add
             </button>
           </div>
+          <div style={{ marginBottom: 16, borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+            <label style={{ display: 'block', fontSize: 11, color: 'var(--text3)', marginBottom: 4, fontFamily: 'var(--font-mono)' }}>Bulk Add Countries</label>
+            <textarea value={bulkCountries} onChange={e => setBulkCountries(e.target.value)} rows={4} placeholder={'One country per line (commas/newlines work too), e.g.\nZambia\nEthiopia'} style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }} />
+            <button onClick={addBulkCountries} style={{ marginTop: 8, background: 'transparent', border: '1px solid var(--accent)', color: 'var(--accent)', borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <Upload size={14} />
+              Add All
+            </button>
+          </div>
           {countriesLoading ? <div style={{ color: 'var(--text3)' }}>Loading countries...</div> : (
-            <div style={{ display: 'grid', gap: 10 }}>
-              {(countries || []).map(country => (
-                <div key={country.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, border: '1px solid var(--border)', borderRadius: 10, background: 'var(--surface2)', padding: '10px 12px' }}>
-                  <div>
-                    <div style={{ color: 'var(--text)', fontSize: 13 }}>{country.name}</div>
-                    <div style={{ color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>{country.added_at || '--'}</div>
-                  </div>
-                  <button onClick={() => removeCountry(country.name)} style={{ background: 'transparent', border: '1px solid #5c2d2d', color: '#ff6666', borderRadius: 8, padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Trash2 size={12} />
-                    Remove
-                  </button>
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <div style={{ position: 'relative', flex: 1 }}>
+                  <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)' }} />
+                  <input
+                    value={countryFilter}
+                    onChange={e => setCountryFilter(e.target.value)}
+                    placeholder="Filter tracked countries..."
+                    style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px 8px 30px', fontSize: 12, boxSizing: 'border-box' }}
+                  />
                 </div>
-              ))}
-            </div>
+                <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
+                  {filteredCountries.length}/{countries.length}
+                </div>
+              </div>
+              <div style={{ display: 'grid', gap: 10, maxHeight: 360, overflowY: 'auto', paddingRight: 4 }}>
+                {filteredCountries.map(country => (
+                  <div key={country.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, border: '1px solid var(--border)', borderRadius: 10, background: 'var(--surface2)', padding: '10px 12px' }}>
+                    <div>
+                      <div style={{ color: 'var(--text)', fontSize: 13 }}>{country.name}</div>
+                      <div style={{ color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>{country.added_at || '--'}</div>
+                    </div>
+                    <button onClick={() => removeCountry(country.name)} style={{ background: 'transparent', border: '1px solid #5c2d2d', color: '#ff6666', borderRadius: 8, padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Trash2 size={12} />
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </Section>
       </div>
 
       <div style={{ marginTop: 16 }}>
         <Section title="Country Fetch Coverage">
+          <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ position: 'relative', flex: '1 1 240px' }}>
+              <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)' }} />
+              <input
+                value={coverageFilter}
+                onChange={e => setCoverageFilter(e.target.value)}
+                placeholder="Filter by country or explanation..."
+                style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px 8px 30px', fontSize: 12, boxSizing: 'border-box' }}
+              />
+            </div>
+            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px', fontSize: 12 }}>
+              <option value="">All statuses</option>
+              <option value="success">success</option>
+              <option value="running">running</option>
+              <option value="failed">failed</option>
+              <option value="no_recent_notices">no_recent_notices</option>
+              <option value="no_data">no_data</option>
+              <option value="not_started">not_started</option>
+            </select>
+            <button onClick={backfillAllCountries} disabled={running} title={`Backfill notices + bidders + award alerts for all countries from ${form.baseline_date || general?.baseline_date || defaultDate()}`} style={{ background: 'var(--accent)', border: '1px solid var(--accent)', color: '#fff', borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, cursor: running ? 'not-allowed' : 'pointer', opacity: running ? 0.6 : 1 }}>
+              <ListRestart size={14} />
+              {running ? 'Starting...' : 'Backfill All (Full Pipeline)'}
+            </button>
+          </div>
           {statusesLoading ? <div style={{ color: 'var(--text3)' }}>Loading country coverage...</div> : (
-            <div style={{ display: 'grid', gap: 10 }}>
-              {(countryStatuses || []).map(country => (
+            <div style={{ display: 'grid', gap: 10, maxHeight: 520, overflowY: 'auto', paddingRight: 4 }}>
+              {filteredStatuses.map(country => (
                 <div key={country.country} style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.8fr 0.7fr 1.5fr auto', gap: 12, alignItems: 'center', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--surface2)', padding: '10px 12px' }}>
                   <div>
                     <div style={{ color: 'var(--text)', fontSize: 13 }}>{country.country}</div>
@@ -166,12 +269,13 @@ export default function Settings() {
                   <div style={{ color: 'var(--text3)', fontSize: 12, lineHeight: 1.35 }}>
                     {country.explanation}
                   </div>
-                  <button onClick={() => backfillCountry(country.country)} title={`Backfill ${country.country}`} style={{ background: 'transparent', border: '1px solid var(--border)', color: 'var(--text2)', borderRadius: 8, padding: '7px 9px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <button onClick={() => backfillCountry(country.country)} title={`Backfill ${country.country} (notices + bidders + alerts) from baseline`} style={{ background: 'transparent', border: '1px solid var(--border)', color: 'var(--text2)', borderRadius: 8, padding: '7px 9px', display: 'flex', alignItems: 'center', gap: 6 }}>
                     <RotateCcw size={12} />
                     Backfill
                   </button>
                 </div>
               ))}
+              {filteredStatuses.length === 0 && <div style={{ color: 'var(--text3)', textAlign: 'center', padding: 20 }}>No countries match the current filters.</div>}
             </div>
           )}
         </Section>

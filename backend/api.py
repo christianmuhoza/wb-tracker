@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import re
 import requests
+import unicodedata
 from bs4 import BeautifulSoup
 
 from db import db, q, ensure_support_tables, get_app_settings_map
@@ -664,6 +665,10 @@ class CountryBody(BaseModel):
     name: str
 
 
+class CountriesBody(BaseModel):
+    names: list[str]
+
+
 class GeneralSettingsBody(BaseModel):
     baseline_date: Optional[str] = None
     country_batch: Optional[int] = None
@@ -694,6 +699,33 @@ def add_country(body: CountryBody):
         if not result:
             raise HTTPException(409, f"'{name}' already exists")
         return {"name": name, "added": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/settings/countries/bulk", status_code=201)
+def add_countries_bulk(body: CountriesBody):
+    names = [n.strip() for n in body.names if n and n.strip()]
+    if not names:
+        raise HTTPException(400, "No country names provided")
+    added = []
+    skipped = []
+    try:
+        with db() as conn:
+            with conn.cursor() as cur:
+                for name in names:
+                    cur.execute(
+                        "INSERT INTO target_countries (name) VALUES (%s) ON CONFLICT (name) DO NOTHING RETURNING name",
+                        (name,)
+                    )
+                    if cur.fetchone():
+                        added.append(name)
+                    else:
+                        skipped.append(name)
+            conn.commit()
+        return {"added": added, "skipped": skipped}
     except HTTPException:
         raise
     except Exception as e:
@@ -3203,6 +3235,46 @@ def delete_bidder(bidder_id: int):
     return {"status": "ok", "deleted_id": bidder_id, "deleted_name": row["name"]}
 
 
+# Bidder origin-country names come straight from World Bank award pages and don't
+# always match the tracked country names used for notices: "Gambia, The" vs
+# "Gambia", French/Portuguese spellings ("Bénin", "Moçambique"), and legacy
+# mojibake ("R?publique centrafricaine"). Normalize both sides before comparing.
+BIDDER_COUNTRY_ALIASES = {
+    "Benin": ["Bénin", "B?nin"],
+    "Central African Republic": ["République centrafricaine", "R?publique centrafricaine"],
+    "Gambia": ["Gambia, The"],
+    "Guinea": ["Guinée"],
+    "Mozambique": ["Moçambique", "Mo?ambique"],
+    "Tanzania": ["Tanzánia"],
+    "Somalia, Federal Republic of": ["Somalia"],
+}
+
+_ACCENT_FROM = "ÁÀÂÃÄÅÇÈÉÊËÍÌÎÏÑÓÒÔÕÖÙÚÛÜÝáàâãäåçèéêëíìîïñóòôõöùúûüýÿ"
+_ACCENT_TO = "AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy"
+_CORRUPT_CHARS = '\ufffd?"\'' + ','
+
+
+def _country_match_keys(country):
+    """Accent/case/mojibake-insensitive keys for a country name and its aliases."""
+    names = {country, *BIDDER_COUNTRY_ALIASES.get(country, [])}
+    keys = set()
+    for name in names:
+        name = unicodedata.normalize("NFKD", name)
+        name = "".join(ch for ch in name if not unicodedata.combining(ch))
+        keys.add("".join(ch for ch in name.lower() if ch not in _CORRUPT_CHARS))
+    return sorted(keys)
+
+
+def _bidder_country_clause(country, prefix="b"):
+    col = f"{prefix}.country"
+    exact = [country, *BIDDER_COUNTRY_ALIASES.get(country, [])]
+    norm_expr = f"lower(translate({col}, %s, %s))"
+    return (
+        f"({col} = ANY(%s::text[]) OR {norm_expr} = ANY(%s::text[]))",
+        [exact, _ACCENT_FROM, _ACCENT_TO, _country_match_keys(country)],
+    )
+
+
 def build_bidder_filters(search: Optional[str], qs: Optional[str], country: Optional[str], tech_only: bool = False):
     search_term = search or qs
     filters = ["1=1"]
@@ -3212,8 +3284,9 @@ def build_bidder_filters(search: Optional[str], qs: Optional[str], country: Opti
         like = f"%{search_term}%"
         params.extend([like, like, like])
     if country:
-        filters.append("b.country = %s")
-        params.append(country)
+        clause, country_params = _bidder_country_clause(country)
+        filters.append(clause)
+        params.extend(country_params)
     if tech_only:
         bidder_filter, bidder_params = build_tech_bidder_condition("b")
         notice_filter, notice_params = build_tech_notice_condition("pn")
@@ -3620,8 +3693,52 @@ def get_country_fetch_status():
     return get_country_fetch_status_rows()
 
 
+def _backfill_country_pipeline(name: str, since: date, with_bidders: bool) -> dict:
+    """Run the full per-country pipeline: notices backfill, bidder import, award alerts."""
+    import fetcher
+    fetcher.init_db()
+    conn = fetcher.get_connection()
+    try:
+        upserted, new_records = fetcher.fetch_batch_resilient(conn, [name], since)
+        rows = q("SELECT status, error_msg FROM country_fetch_status WHERE country = %s", [name])
+        country_status = rows[0]["status"] if rows else "unknown"
+        error_msg = rows[0]["error_msg"] if rows else None
+        success = country_status != "failed"
+        fetcher.log_run(conn, name, upserted, new_records, success, error_msg)
+    finally:
+        conn.close()
+
+    bidder_result = None
+    alert_result = None
+    if success:
+        if with_bidders:
+            try:
+                bidder_result = import_missing_awards_by_country(name)
+            except Exception as bidder_error:
+                bidder_result = {"status": "error", "error": str(bidder_error)}
+        try:
+            alert_result = sync_award_alerts()
+        except Exception as alert_error:
+            alert_result = {"status": "error", "error": str(alert_error)}
+    return {
+        "name": name,
+        "since": str(since),
+        "upserted": upserted,
+        "new_records": new_records,
+        "success": success,
+        "country_status": country_status,
+        "error_msg": error_msg,
+        "bidder_import": bidder_result,
+        "award_alerts": alert_result,
+    }
+
+
 @app.post("/api/fetch/backfill/{name}")
-def trigger_country_backfill(name: str, since: Optional[date] = Query(None)):
+def trigger_country_backfill(
+    name: str,
+    since: Optional[date] = Query(None),
+    with_bidders: bool = Query(True),
+):
     if _fetch_status["running"]:
         return {"status": "already_running", "message": "Another fetch is already in progress"}
 
@@ -3644,31 +3761,17 @@ def trigger_country_backfill(name: str, since: Optional[date] = Query(None)):
 
     def run_backfill():
         try:
-            import fetcher
-            fetcher.init_db()
-            conn = fetcher.get_connection()
-            try:
-                upserted, new_records = fetcher.fetch_batch_resilient(conn, [name], since)
-                rows = q("SELECT status, error_msg FROM country_fetch_status WHERE country = %s", [name])
-                country_status = rows[0]["status"] if rows else "unknown"
-                error_msg = rows[0]["error_msg"] if rows else None
-                success = country_status != "failed"
-                fetcher.log_run(conn, name, upserted, new_records, success, error_msg)
-            finally:
-                conn.close()
-
-            alert_result = None
-            if success:
-                try:
-                    alert_result = sync_award_alerts()
-                except Exception as alert_error:
-                    alert_result = {"status": "error", "error": str(alert_error)}
+            result = _backfill_country_pipeline(name, since, with_bidders)
             _fetch_status["last_result"] = {
-                "exit_code": 0 if success else 1,
-                "stdout": f"{name} backfill finished from {since}: {upserted} fetched, {new_records} new, status={country_status}",
-                "stderr": error_msg or "",
-                "success": success,
-                "award_alerts": alert_result,
+                "exit_code": 0 if result["success"] else 1,
+                "stdout": (
+                    f"{name} backfill finished from {since}: {result['upserted']} fetched, "
+                    f"{result['new_records']} new, status={result['country_status']}"
+                ),
+                "stderr": result["error_msg"] or "",
+                "success": result["success"],
+                "bidder_import": result["bidder_import"],
+                "award_alerts": result["award_alerts"],
             }
         except Exception as e:
             _fetch_status["last_result"] = {
@@ -3683,6 +3786,88 @@ def trigger_country_backfill(name: str, since: Optional[date] = Query(None)):
 
     threading.Thread(target=run_backfill, daemon=True).start()
     return {"status": "started", "message": f"{name} backfill started", "since": str(since)}
+
+
+@app.post("/api/fetch/backfill_all")
+def trigger_full_backfill(
+    since: Optional[date] = Query(None),
+    with_bidders: bool = Query(True),
+):
+    """Backfill notices from baseline for every tracked country, then import bidders and sync award alerts."""
+    if _fetch_status["running"]:
+        return {"status": "already_running", "message": "Another fetch is already in progress"}
+
+    ensure_support_tables()
+    country_rows = q("SELECT name FROM target_countries ORDER BY name")
+    countries = [r["name"] for r in country_rows]
+    if not countries:
+        raise HTTPException(400, "No countries are tracked yet")
+
+    settings = get_app_settings_map()
+    if since is None:
+        try:
+            since = datetime.strptime(settings.get("baseline_date", "2025-01-01"), "%Y-%m-%d").date()
+        except ValueError:
+            since = date(2025, 1, 1)
+
+    _fetch_status["running"]        = True
+    _fetch_status["last_triggered"] = datetime.utcnow().isoformat()
+    _fetch_status["last_finished"]  = None
+    _fetch_status["last_result"]    = None
+
+    def run_full_backfill():
+        try:
+            import fetcher
+            fetcher.init_db()
+            conn = fetcher.get_connection()
+            try:
+                upserted, new_records = fetcher.fetch_batch_resilient(conn, countries, since)
+                failed_rows = q(
+                    "SELECT country FROM country_fetch_status WHERE country = ANY(%s) AND status = 'failed' ORDER BY country",
+                    (countries,)
+                )
+                failed_countries = [r["country"] for r in failed_rows]
+                success = not failed_countries
+                error_msg = ("Partial success: failed countries: " + ", ".join(failed_countries)) if failed_countries else None
+                fetcher.log_run(conn, ",".join(countries), upserted, new_records, success, error_msg)
+            finally:
+                conn.close()
+
+            bidder_result = None
+            alert_result = None
+            if with_bidders:
+                bidder_result = {"countries": {}}
+                for c in countries:
+                    try:
+                        bidder_result["countries"][c] = import_missing_awards_by_country(c)
+                    except Exception as bidder_error:
+                        bidder_result["countries"][c] = {"status": "error", "error": str(bidder_error)}
+            try:
+                alert_result = sync_award_alerts()
+            except Exception as alert_error:
+                alert_result = {"status": "error", "error": str(alert_error)}
+
+            _fetch_status["last_result"] = {
+                "exit_code": 0 if success else 1,
+                "stdout": (
+                    f"Full backfill finished from {since}: {upserted} fetched, {new_records} new "
+                    f"across {len(countries)} countries"
+                ),
+                "stderr": error_msg or "",
+                "success": success,
+                "bidder_import": bidder_result,
+                "award_alerts": alert_result,
+            }
+        except Exception as e:
+            _fetch_status["last_result"] = {
+                "exit_code": -1, "stdout": "", "stderr": str(e), "success": False,
+            }
+        finally:
+            _fetch_status["running"]       = False
+            _fetch_status["last_finished"] = datetime.utcnow().isoformat()
+
+    threading.Thread(target=run_full_backfill, daemon=True).start()
+    return {"status": "started", "message": f"Full backfill started for {len(countries)} countries", "since": str(since)}
 
 
 # ── Other ─────────────────────────────────────────────────────────────────────

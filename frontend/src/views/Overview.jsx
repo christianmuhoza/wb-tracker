@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useApi } from '../hooks/useApi.js'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -186,11 +186,14 @@ function FetchButton({ onDone }) {
   const [log, setLog] = useState('')
   const [open, setOpen] = useState(false)
   const [startedAt, setStartedAt] = useState(null)
+  const failCountRef = useRef(0)
+  const MAX_FAILS = 5
 
   const pollStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/fetch/status')
-      if (!res.ok) throw new Error('Could not read fetch status')
+      if (!res.ok) throw new Error(`Backend returned ${res.status}: ${res.statusText}`)
+      failCountRef.current = 0
       const data = await res.json()
 
       if (!data.running && data.last_result) {
@@ -214,10 +217,14 @@ function FetchButton({ onDone }) {
       }
 
       return true
-    } catch {
-      setState('error')
-      setLog('Could not reach the backend while checking fetch status.')
-      return false
+    } catch (err) {
+      failCountRef.current += 1
+      if (failCountRef.current >= MAX_FAILS) {
+        setState('error')
+        setLog(`Could not reach the backend while checking fetch status (${failCountRef.current} consecutive failures). ${err.message}`)
+        return false
+      }
+      return true
     }
   }, [onDone, startedAt])
 
