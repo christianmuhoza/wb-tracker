@@ -1,6 +1,7 @@
 import { Fragment, useState } from 'react'
 import { useApi, buildUrl } from '../hooks/useApi.js'
 import { Search, ExternalLink, ChevronLeft, ChevronRight, X, Download, Loader, BookmarkPlus, Trash2, FileDown, Cpu, ArrowDown, ArrowUp } from 'lucide-react'
+import { apiUrl, getToken } from '../api.js'
 
 const COLORS = { IFB: '#00d4aa', REOI: '#7c6fff', 'Contract Award': '#f0a500', Award: '#f0a500' }
 const NOTICE_TYPE_OPTIONS = ['IFB', 'REOI', 'Contract Award']
@@ -778,7 +779,7 @@ function ExportButton({ filters, total }) {
 
     try {
       const endpoint = type === 'csv' || type === 'csv_custom' ? '/api/export/csv' : '/api/export'
-      const res = await fetch(`${endpoint}?${params.toString()}`)
+      const res = await fetch(apiUrl(endpoint, Object.fromEntries(params)), { headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} })
       if (!res.ok) throw new Error()
 
       const disposition = res.headers.get('Content-Disposition') || ''

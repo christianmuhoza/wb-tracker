@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useApi } from '../hooks/useApi.js'
 import { Save, Plus, Trash2, RefreshCw, RotateCcw, Upload, Search, ListRestart } from 'lucide-react'
+import { apiPost, apiPut, apiDelete } from '../api.js'
 
 function Section({ title, children }) {
   return (
@@ -48,23 +49,23 @@ export default function Settings() {
       request_delay: Number(form.request_delay || general?.request_delay || 1.2),
       auto_sync_hour: form.auto_sync_hour || general?.auto_sync_hour,
     }
-    const res = await fetch('/api/settings/general', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    setMessage(res.ok ? 'Settings saved.' : 'Could not save settings.')
+    try {
+      await apiPut('/settings/general', payload)
+      setMessage('Settings saved.')
+    } catch {
+      setMessage('Could not save settings.')
+    }
     setRefreshKey(k => k + 1)
   }
 
   const addCountry = async () => {
     if (!newCountry.trim()) return
-    const res = await fetch('/api/settings/countries', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newCountry.trim() }),
-    })
-    setMessage(res.ok ? `${newCountry.trim()} added.` : `Could not add ${newCountry.trim()}.`)
+    try {
+      await apiPost('/settings/countries', { name: newCountry.trim() })
+      setMessage(`${newCountry.trim()} added.`)
+    } catch {
+      setMessage(`Could not add ${newCountry.trim()}.`)
+    }
     setNewCountry('')
     setRefreshKey(k => k + 1)
   }
@@ -72,15 +73,10 @@ export default function Settings() {
   const addBulkCountries = async () => {
     const names = bulkCountries.split(/[\n,;]/).map(n => n.trim()).filter(Boolean)
     if (!names.length) return
-    const res = await fetch('/api/settings/countries/bulk', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names }),
-    })
-    if (res.ok) {
-      const data = await res.json()
+    try {
+      const data = await apiPost('/settings/countries/bulk', { names })
       setMessage(`${data.added.length} country(ies) added${data.skipped.length ? `, ${data.skipped.length} skipped (already present)` : ''}.`)
-    } else {
+    } catch {
       setMessage('Could not add countries.')
     }
     setBulkCountries('')
@@ -88,8 +84,12 @@ export default function Settings() {
   }
 
   const removeCountry = async (name) => {
-    const res = await fetch(`/api/settings/countries/${encodeURIComponent(name)}`, { method: 'DELETE' })
-    setMessage(res.ok ? `${name} removed.` : `Could not remove ${name}.`)
+    try {
+      await apiDelete(`/settings/countries/${encodeURIComponent(name)}`)
+      setMessage(`${name} removed.`)
+    } catch {
+      setMessage(`Could not remove ${name}.`)
+    }
     setRefreshKey(k => k + 1)
   }
 
@@ -97,11 +97,12 @@ export default function Settings() {
 
   const backfillCountry = async (name) => {
     const since = form.baseline_date || general?.baseline_date || defaultDate()
-    const res = await fetch(`/api/fetch/backfill/${encodeURIComponent(name)}?since=${encodeURIComponent(since)}`, { method: 'POST' })
-    const data = await res.json().catch(() => ({}))
-    setMessage(res.ok
-      ? `${name}: notices backfill started from ${since}. Bidders + award alerts are processed automatically after it finishes.`
-      : `Could not start ${name} backfill: ${data.message || ''}`)
+    try {
+      await apiPost(`/fetch/backfill/${encodeURIComponent(name)}?since=${encodeURIComponent(since)}`)
+      setMessage(`${name}: notices backfill started from ${since}. Bidders + award alerts are processed automatically after it finishes.`)
+    } catch {
+      setMessage(`Could not start ${name} backfill.`)
+    }
     setRefreshKey(k => k + 1)
   }
 
@@ -109,11 +110,10 @@ export default function Settings() {
     const since = form.baseline_date || general?.baseline_date || defaultDate()
     setRunning(true)
     try {
-      const res = await fetch(`/api/fetch/backfill_all?since=${encodeURIComponent(since)}`, { method: 'POST' })
-      const data = await res.json().catch(() => ({}))
-      setMessage(res.ok
-        ? `Full backfill started for all countries from ${since}. Notices → bidders → award alerts run in the background.`
-        : `Could not start full backfill: ${data.message || ''}`)
+      await apiPost(`/fetch/backfill_all?since=${encodeURIComponent(since)}`)
+      setMessage(`Full backfill started for all countries from ${since}. Notices → bidders → award alerts run in the background.`)
+    } catch {
+      setMessage('Could not start full backfill.')
     } finally {
       setRunning(false)
       setRefreshKey(k => k + 1)

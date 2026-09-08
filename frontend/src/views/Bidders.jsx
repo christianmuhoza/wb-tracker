@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Cpu } from 'lucide-react'
+import { apiGet, apiPost, apiPut, apiDelete, apiUrl, getToken } from '../api.js'
 
 const fmtDate = (d) => (d ? d.slice(0, 10) : '-')
 
@@ -107,26 +108,25 @@ function BidderExportButton({ filters, total }) {
   const [exportError, setExportError] = useState(null)
   const [exportType, setExportType] = useState('excel')
   const [selectedFields, setSelectedFields] = useState([
-    'name', 'country', 'category', 'bid_count', 'won_count', 'total_bid_amount', 'primary_currency', 'last_bid_date',
+    'c', 'name', 'country', 'project_country', 'project_id',
+    'contract_reference', 'title', 'award_date', 'currency',
+    'contract_value', 'company_website', 'url', 'notes',
   ])
 
   const availableFields = [
-    ['name', 'Bidder Name'],
-    ['country', 'Country of Origin'],
-    ['category', 'Category'],
-    ['bid_count', 'Total Bids'],
-    ['won_count', 'Won Bids'],
-    ['total_bid_amount', 'Total Bid Amount'],
-    ['primary_currency', 'Currency'],
-    ['last_bid_date', 'Last Bid Date'],
-    ['latest_bid_title', 'Latest Bid'],
-    ['contact_name', 'Contact Name'],
-    ['contact_email', 'Contact Email'],
-    ['contact_phone', 'Contact Phone'],
-    ['contact_org', 'Organisation'],
-    ['business_model', 'Business Model'],
-    ['core_products', 'Core Products'],
-    ['corporate_activities', 'Corporate Activities'],
+    ['c', '#'],
+    ['name', 'Company'],
+    ['country', 'Supplier Country'],
+    ['project_country', 'Project Country / Region'],
+    ['project_id', 'Project ID'],
+    ['contract_reference', 'Contract Reference'],
+    ['title', 'Contract / Scope'],
+    ['award_date', 'Award Date'],
+    ['currency', 'Currency'],
+    ['contract_value', 'Contract Value'],
+    ['company_website', 'Company Website'],
+    ['url', 'World Bank Award Notice'],
+    ['notes', 'Notes'],
   ]
 
   const toggleField = (field) => {
@@ -144,7 +144,7 @@ function BidderExportButton({ filters, total }) {
       if (filters.tech_only) params.set('tech_only', 'true')
       params.set('fields', selectedFields.join(','))
       const endpoint = exportType === 'csv' ? '/api/bidders/export/csv' : '/api/bidders/export'
-      const res = await fetch(`${endpoint}?${params.toString()}`)
+      const res = await fetch(apiUrl(endpoint, Object.fromEntries(params)), { headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} })
       if (!res.ok) throw new Error('Export failed')
       const disposition = res.headers.get('Content-Disposition') || ''
       const match = disposition.match(/filename="(.+)"/)
@@ -251,7 +251,7 @@ function BidderExportButton({ filters, total }) {
   )
 }
 
-function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
+function BidderDetail({ bidder, onClose, onSaved, onDeleted, setConfirmDelete, setNotification }) {
   const [notices, setNotices] = useState([])
   const [loadingNotices, setLoadingNotices] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -267,8 +267,7 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
     setForm({ ...bidder })
     setLoadingNotices(true)
     const controller = new AbortController()
-    fetch(`/api/bidders/${bidder.id}/notices`, { signal: controller.signal })
-      .then(r => { if (!r.ok) throw new Error('Failed to fetch notices'); return r.json() })
+    apiGet(`/bidders/${bidder.id}/notices`)
       .then(setNotices)
       .catch(() => { if (!controller.signal.aborted) setNotices([]) })
       .finally(() => { if (!controller.signal.aborted) setLoadingNotices(false) })
@@ -278,15 +277,9 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
   const save = async () => {
     setSaving(true)
     try {
-      const res = await fetch(`/api/bidders/${bidder.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      })
-      if (res.ok) {
-        onSaved()
-        setEditing(false)
-      }
+      await apiPut(`/bidders/${bidder.id}`, form)
+      onSaved()
+      setEditing(false)
     } finally {
       setSaving(false)
     }
@@ -296,8 +289,7 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
     setConfirmDelete({ name: bidder.name, onConfirm: async () => {
       setDeleting(true)
       try {
-        const res = await fetch(`/api/bidders/${bidder.id}`, { method: 'DELETE' })
-        if (!res.ok) throw new Error('Delete failed')
+        await apiDelete(`/bidders/${bidder.id}`)
         onDeleted?.()
       } catch {
         setNotification('Failed to delete bidder.')
@@ -312,9 +304,7 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
     setEnriching(true)
     setEnrichResult(null)
     try {
-      const res = await fetch(`/api/bidders/${bidder.id}/enrich`, { method: 'POST' })
-      if (!res.ok) throw new Error('Enrich failed')
-      const data = await res.json()
+      const data = await apiPost(`/bidders/${bidder.id}/enrich`)
       setEnrichResult(data)
       if (data.status === 'ok') onSaved()
     } catch {
@@ -328,9 +318,7 @@ function BidderDetail({ bidder, onClose, onSaved, onDeleted }) {
     setEnrichingGemini(true)
     setGeminiResult(null)
     try {
-      const res = await fetch(`/api/bidders/${bidder.id}/enrich_gemini`, { method: 'POST' })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Gemini enrichment failed')
+      const data = await apiPost(`/bidders/${bidder.id}/enrich_gemini`)
       setGeminiResult(data)
       if (data.status === 'ok') {
         onSaved()
@@ -760,15 +748,14 @@ export default function Bidders() {
   const fetchBidders = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ page, page_size: 25 })
-      if (search) params.set('search', search)
-      if (country) params.set('country', country)
-      if (wonOnly) params.set('won_only', 'true')
-      if (techOnly) params.set('tech_only', 'true')
-      params.set('sort_by', sortBy)
-      params.set('sort_order', sortOrder)
-      const res = await fetch(`/api/bidders?${params}`)
-      const json = await res.json()
+      const params = { page, page_size: 25 }
+      if (search) params.search = search
+      if (country) params.country = country
+      if (wonOnly) params.won_only = 'true'
+      if (techOnly) params.tech_only = 'true'
+      params.sort_by = sortBy
+      params.sort_order = sortOrder
+      const json = await apiGet('/bidders', params)
       if (Array.isArray(json)) {
         setData(json)
         setTotal(json.length)
@@ -794,17 +781,14 @@ export default function Bidders() {
   useEffect(() => { setPage(1) }, [search, country, wonOnly, techOnly, sortBy, sortOrder])
 
   useEffect(() => {
-    fetch('/api/settings/countries')
-      .then(res => res.ok ? res.json() : [])
+    apiGet('/settings/countries')
       .then(json => setCountryOptions(Array.isArray(json) ? json.map(item => item.name).filter(Boolean) : []))
       .catch(() => setCountryOptions([]))
   }, [])
 
   const fetchImportStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/bidders/import_status')
-      if (!res.ok) return
-      const json = await res.json()
+      const json = await apiGet('/bidders/import_status')
       setImportStatus(json)
     } catch {
       // ignore
@@ -816,7 +800,7 @@ export default function Bidders() {
   const importAll = async () => {
     setImporting(true)
     try {
-      await fetch('/api/bidders/import_awards_all', { method: 'POST' })
+      await apiPost('/bidders/import_awards_all')
       setNotification('Batch import started in background. Refresh shortly to see the updated bidder details.')
     } finally {
       setImporting(false)
@@ -831,16 +815,14 @@ export default function Bidders() {
 
     const encodedCountry = encodeURIComponent(country.trim())
     const endpoint = missingOnly
-      ? `/api/bidders/import_missing_by_country?country=${encodedCountry}`
-      : `/api/bidders/import_by_country?country=${encodedCountry}`
+      ? `/bidders/import_missing_by_country?country=${encodedCountry}`
+      : `/bidders/import_by_country?country=${encodedCountry}`
 
     if (missingOnly) setImportingMissingCountry(true)
     else setImportingCountry(true)
 
     try {
-      const res = await fetch(endpoint, { method: 'POST' })
-      if (!res.ok) throw new Error('Country import failed')
-      const data = await res.json()
+      const data = await apiPost(endpoint)
       if (missingOnly) {
         await fetchBidders()
         await fetchImportStatus()
@@ -859,8 +841,7 @@ export default function Bidders() {
   const importMissing = async () => {
     setFinishingImport(true)
     try {
-      const res = await fetch('/api/bidders/import_missing', { method: 'POST' })
-      if (!res.ok) throw new Error('Import missing failed')
+      await apiPost('/bidders/import_missing')
       await fetchBidders()
       await fetchImportStatus()
       setNotification('Missing bidder imports finished.')
@@ -1221,6 +1202,8 @@ export default function Bidders() {
             onClose={() => setSelected(null)}
             onSaved={() => { fetchBidders(); setSelected(null) }}
             onDeleted={() => { fetchBidders(); setSelected(null) }}
+            setConfirmDelete={setConfirmDelete}
+            setNotification={setNotification}
           />
         </>
       )}

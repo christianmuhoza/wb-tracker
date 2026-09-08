@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Cpu, Download, ExternalLink, RefreshCw, Sparkles } from 'lucide-react'
 import { useApi, buildUrl } from '../hooks/useApi.js'
+import { apiPost } from '../api.js'
 
 export default function SoftwareOpportunities() {
   const [category, setCategory] = useState('')
@@ -13,9 +14,7 @@ export default function SoftwareOpportunities() {
   const classifyPending = async () => {
     setRunning(true); setMessage('')
     try {
-      const response = await fetch('/api/software-opportunities/classify-pending?limit=10', { method: 'POST' })
-      const result = await response.json()
-      if (!response.ok) throw new Error(result.detail || 'Classification failed')
+      const result = await apiPost('/software-opportunities/classify-pending?limit=10')
       setMessage(`Classified ${result.classified.length} notices${result.failed.length ? `; ${result.failed.length} need attention` : ''}.`)
       setRefreshKey(key => key + 1)
     } catch (err) { setMessage(err.message) } finally { setRunning(false) }

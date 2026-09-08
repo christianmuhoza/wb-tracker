@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useApi } from '../hooks/useApi.js'
+import { apiGet, apiPost } from '../api.js'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, PieChart, Pie, Cell, CartesianGrid
@@ -191,10 +192,8 @@ function FetchButton({ onDone }) {
 
   const pollStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/fetch/status')
-      if (!res.ok) throw new Error(`Backend returned ${res.status}: ${res.statusText}`)
+      const data = await apiGet('/fetch/status')
       failCountRef.current = 0
-      const data = await res.json()
 
       if (!data.running && data.last_result) {
         const success = data.last_result?.success
@@ -244,10 +243,8 @@ function FetchButton({ onDone }) {
     setOpen(false)
     setStartedAt(Date.now())
     try {
-      const res = await fetch('/api/fetch', { method: 'POST' })
-      if (!res.ok) throw new Error('Could not start fetch')
-      const data = await res.json()
-      if (data.status !== 'started' && data.status !== 'already_running') {
+      const data = await apiPost('/fetch/')
+      if (!['queued', 'started', 'already_running'].includes(data.status)) {
         throw new Error(data.message || 'Fetch did not start correctly')
       }
     } catch (error) {

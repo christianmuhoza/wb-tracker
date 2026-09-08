@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Bell, CheckCircle, ExternalLink, RefreshCw, ShieldCheck, XCircle } from 'lucide-react'
+import { Bell, CheckCircle, Download, ExternalLink, RefreshCw, ShieldCheck, XCircle } from 'lucide-react'
+import { apiGet, apiPost, apiPut } from '../api.js'
 
 const fmtDate = (value) => value ? String(value).slice(0, 10) : '--'
 
 const fmtMoney = (amount, currency) => {
   if (!amount || Number(amount) === 0) return '--'
+  if (!currency) return Number(amount).toLocaleString('en-US', { maximumFractionDigits: 2 })
   try {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
-      currency: currency || 'USD',
+      currency,
       maximumFractionDigits: 2,
     }).format(Number(amount))
   } catch {
-    return `${currency || ''} ${Number(amount).toLocaleString('en-US')}`.trim()
+    return `${currency} ${Number(amount).toLocaleString('en-US')}`.trim()
   }
 }
 
@@ -57,11 +59,10 @@ function NoticePanel({ label, type, title, projectId, projectName, country, borr
 function AlertCard({ alert, onRefresh }) {
   const [busy, setBusy] = useState(null)
 
-  const update = async (action, url, options = {}) => {
+  const update = async (action, path) => {
     setBusy(action)
     try {
-      const res = await fetch(url, options)
-      if (!res.ok) throw new Error('Request failed')
+      await apiPut(path)
       await onRefresh()
     } finally {
       setBusy(null)
@@ -83,14 +84,14 @@ function AlertCard({ alert, onRefresh }) {
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {!alert.seen_at && (
-            <button onClick={() => update('seen', `/api/award-alerts/${alert.id}/seen`, { method: 'PUT' })} disabled={!!busy} style={buttonStyle(false)}>
+            <button onClick={() => update('seen', `/award-alerts/${alert.id}/seen`)} disabled={!!busy} style={buttonStyle(false)}>
               <CheckCircle size={13} /> Seen
             </button>
           )}
-          <button onClick={() => update('confirmed', `/api/award-alerts/${alert.id}/status?match_status=confirmed`, { method: 'PUT' })} disabled={!!busy} style={buttonStyle(false)}>
+          <button onClick={() => update('confirmed', `/award-alerts/${alert.id}/status?match_status=confirmed`)} disabled={!!busy} style={buttonStyle(false)}>
             <ShieldCheck size={13} /> Confirm
           </button>
-          <button onClick={() => update('rejected', `/api/award-alerts/${alert.id}/status?match_status=rejected`, { method: 'PUT' })} disabled={!!busy} style={buttonStyle(true)}>
+          <button onClick={() => update('rejected', `/award-alerts/${alert.id}/status?match_status=rejected`)} disabled={!!busy} style={buttonStyle(true)}>
             <XCircle size={13} /> Reject
           </button>
         </div>
@@ -158,25 +159,27 @@ export default function AwardAlerts() {
   const [filter, setFilter] = useState('all')
   const [message, setMessage] = useState('')
 
-  const query = useMemo(() => {
-    const params = new URLSearchParams({ page_size: '50' })
+  const exportUrl = useMemo(() => {
+    const params = new URLSearchParams()
     if (filter === 'unread') params.set('unread_only', 'true')
     if (filter === 'review') params.set('status', 'needs_review')
-    return params.toString()
+    const s = params.toString()
+    return `/api/award-alerts/export${s ? `?${s}` : ''}`
   }, [filter])
 
   const loadAlerts = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch(`/api/award-alerts?${query}`)
-      if (!res.ok) throw new Error('Failed to load award alerts')
-      const data = await res.json()
+      const params = { page_size: '50' }
+      if (filter === 'unread') params.unread_only = 'true'
+      if (filter === 'review') params.status = 'needs_review'
+      const data = await apiGet('/award-alerts', params)
       setAlerts(data.data || [])
       setMeta({ total: data.total || 0, unread: data.unread || 0 })
     } finally {
       setLoading(false)
     }
-  }, [query])
+  }, [filter])
 
   useEffect(() => { loadAlerts() }, [loadAlerts])
 
@@ -184,9 +187,7 @@ export default function AwardAlerts() {
     setSyncing(true)
     setMessage('')
     try {
-      const res = await fetch('/api/award-alerts/sync', { method: 'POST' })
-      if (!res.ok) throw new Error('Sync failed')
-      const data = await res.json()
+      const data = await apiPost('/award-alerts/sync')
       setMessage(`Sync complete: ${data.created || 0} new alerts, ${data.updated || 0} refreshed.`)
       await loadAlerts()
     } catch {
@@ -197,7 +198,7 @@ export default function AwardAlerts() {
   }
 
   const markAllSeen = async () => {
-    await fetch('/api/award-alerts/mark-all-seen', { method: 'POST' })
+    await apiPost('/award-alerts/mark-all-seen')
     await loadAlerts()
   }
 
@@ -215,6 +216,9 @@ export default function AwardAlerts() {
           <button onClick={markAllSeen} disabled={meta.unread === 0} style={buttonStyle(false)}>
             <CheckCircle size={13} /> Mark All Seen
           </button>
+          <a href={exportUrl} download style={{ ...buttonStyle(false), textDecoration: 'none' }}>
+            <Download size={13} /> Export CSV
+          </a>
         </div>
       </div>
 

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Search, X, ExternalLink, ChevronLeft, ChevronRight, Download } from 'lucide-react'
+import { apiUrl, getToken } from '../api.js'
 
 const COLORS = { IFB: '#00d4aa', REOI: '#7c6fff', 'Contract Award': '#f0a500', Award: '#f0a500' }
 const PAGE_SIZE = 25
@@ -75,7 +76,7 @@ function InstitutionDetail({ borrower, country, summary, onClose }) {
     setLoading(true)
     const controller = new AbortController()
     const params = new URLSearchParams({ borrower, country, page_size: '50' })
-    fetch(`/api/notices?${params.toString()}`, { signal: controller.signal })
+    fetch(apiUrl('/notices', Object.fromEntries(params)), { signal: controller.signal, headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} })
       .then(r => { if (!r.ok) throw new Error(); return r.json() })
       .then(d => setNotices(d.data || []))
       .catch(() => { if (!controller.signal.aborted) setNotices([]) })
@@ -255,7 +256,7 @@ export default function Borrowers() {
       if (search) params.set('search', search)
       if (country) params.set('country', country)
       if (noticeType) params.set('notice_type', noticeType)
-      const res = await fetch(`/api/borrowers?${params.toString()}`)
+      const res = await fetch(apiUrl('/borrowers', Object.fromEntries(params)), { headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} })
       if (!res.ok) throw new Error()
       setData(await res.json())
     } catch {
@@ -295,7 +296,7 @@ export default function Borrowers() {
       if (search) params.set('search', search)
       if (country) params.set('country', country)
       if (noticeType) params.set('notice_type', noticeType)
-      const res = await fetch(`/api/borrowers/export?${params.toString()}`)
+      const res = await fetch(apiUrl('/borrowers/export', Object.fromEntries(params)), { headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} })
       if (!res.ok) throw new Error()
       const disposition = res.headers.get('Content-Disposition') || ''
       const match = disposition.match(/filename="(.+)"/)
@@ -322,7 +323,7 @@ export default function Borrowers() {
         min_awards: String(qualifiedMinAwards),
         tech_only: String(qualifiedTechOnly),
       })
-      const res = await fetch(`/api/borrowers/export/qualified?${params.toString()}`)
+      const res = await fetch(apiUrl('/borrowers/export/qualified', Object.fromEntries(params)), { headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {} })
       if (!res.ok) throw new Error()
       const disposition = res.headers.get('Content-Disposition') || ''
       const match = disposition.match(/filename="(.+)"/)
