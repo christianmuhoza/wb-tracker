@@ -27,6 +27,7 @@ import requests
 import unicodedata
 from bs4 import BeautifulSoup
 
+from auth import seed_admin_from_env
 from db import db, q, ensure_support_tables, get_app_settings_map
 from services.tech import build_tech_notice_condition, build_tech_bidder_condition, classify_notice_tech, looks_like_tech_bidder
 from services.contact_enrichment import search_company_contact
@@ -42,6 +43,12 @@ from services.bidder_extraction import (
 load_dotenv()
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+def bootstrap_users():
+    """Keep the legacy `uvicorn api:app` development command bootstrapped."""
+    seed_admin_from_env()
 
 # CORS
 app.add_middleware(
@@ -789,6 +796,12 @@ def update_general_settings(body: GeneralSettingsBody):
 
 def ensure_award_alert_tables():
     ensure_support_tables()
+    existing = {
+        row["indexname"]
+        for row in q("SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'award_alerts'")
+    }
+    if {"idx_award_alerts_seen", "idx_award_alerts_status", "idx_award_alerts_award"}.issubset(existing):
+        return
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -806,9 +819,12 @@ def ensure_award_alert_tables():
                     UNIQUE(source_notice_id, award_notice_id)
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_seen ON award_alerts (seen_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_status ON award_alerts (match_status)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_award ON award_alerts (award_notice_id)")
+            if "idx_award_alerts_seen" not in existing:
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_seen ON award_alerts (seen_at)")
+            if "idx_award_alerts_status" not in existing:
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_status ON award_alerts (match_status)")
+            if "idx_award_alerts_award" not in existing:
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_award ON award_alerts (award_notice_id)")
         conn.commit()
 
 
@@ -871,6 +887,7 @@ def sync_award_alerts():
 
     created = 0
     reviewed = 0
+    processed = 0
     with db() as conn:
         with conn.cursor() as cur:
             for award in award_rows:
@@ -918,6 +935,9 @@ def sync_award_alerts():
                             created += 1
                         else:
                             reviewed += 1
+                processed += 1
+                if processed % 200 == 0:
+                    conn.commit()
         conn.commit()
 
     return {"status": "ok", "created": created, "updated": reviewed, "awards_checked": len(award_rows)}
@@ -994,7 +1014,7 @@ def list_award_alerts(
         JOIN procurement_notices src ON src.id = aa.source_notice_id
         JOIN procurement_notices award ON award.id = aa.award_notice_id
         WHERE {where}
-        ORDER BY aa.seen_at IS NOT NULL, aa.created_at DESC, aa.match_score DESC
+        ORDER BY aa.seen_at IS NOT NULL, award.notice_date DESC NULLS LAST, aa.created_at DESC, aa.match_score DESC
         LIMIT %s OFFSET %s
     """, params + [page_size, offset])
 
@@ -1037,6 +1057,149 @@ def list_award_alerts(
         "page_size": page_size,
         "data": [dict(row) for row in rows],
     }
+
+
+@app.get("/api/award-alerts/export")
+def export_award_alerts(
+    unread_only: bool = Query(False),
+    status: Optional[str] = Query(None),
+):
+    ensure_award_alert_tables()
+    filters = ["aa.dismissed_at IS NULL"]
+    params: List[Any] = []
+    if unread_only:
+        filters.append("aa.seen_at IS NULL")
+    if status:
+        filters.append("aa.match_status = %s")
+        params.append(status)
+    where = " AND ".join(filters)
+
+    sql = f"""
+        SELECT
+            aa.id,
+            aa.match_status,
+            aa.match_score,
+            aa.matched_reason,
+            aa.seen_at::text,
+            aa.created_at::text,
+            src.notice_type AS source_notice_type,
+            src.title AS source_title,
+            src.project_id AS source_project_id,
+            src.project_name AS source_project_name,
+            src.country AS source_country,
+            src.borrower AS source_borrower,
+            src.notice_date::text AS source_notice_date,
+            src.url AS source_url,
+            award.notice_type AS award_notice_type,
+            award.title AS award_title,
+            award.project_id AS award_project_id,
+            award.project_name AS award_project_name,
+            award.country AS award_country,
+            award.borrower AS award_borrower,
+            award.notice_date::text AS award_notice_date,
+            COALESCE((
+                SELECT MAX(ba.award_amount) FROM bidder_awards ba
+                WHERE ba.notice_id = award.id AND ba.won IS TRUE
+            ), award.contract_amount) AS award_amount,
+            COALESCE((
+                SELECT ba.currency FROM bidder_awards ba
+                WHERE ba.notice_id = award.id AND ba.won IS TRUE
+                ORDER BY ba.award_amount DESC NULLS LAST LIMIT 1
+            ), award.currency) AS award_currency,
+            award.url AS award_url,
+            award.description AS award_description,
+            COALESCE((
+                SELECT STRING_AGG(b.name, ', ' ORDER BY b.name ASC)
+                FROM bidder_awards ba
+                JOIN bidders b ON b.id = ba.bidder_id
+                WHERE ba.notice_id = award.id AND ba.won IS TRUE
+            ), '') AS awarded_bidders
+        FROM award_alerts aa
+        JOIN procurement_notices src ON src.id = aa.source_notice_id
+        JOIN procurement_notices award ON award.id = aa.award_notice_id
+        WHERE {where}
+        ORDER BY aa.seen_at IS NOT NULL, award.notice_date DESC NULLS LAST, aa.created_at DESC, aa.match_score DESC
+    """
+
+    amount_re = re.compile(
+        r'(?:Signed\s+Contract\s+[Pp]rice|Evaluated\s+Bid\s+Price|'
+        r'Contract\s+Amount|Award\s+Amount|Total\s+Contract\s+Price)'
+        r'\s*[:\n]?\s*(?:[A-Z]{3})?\s*([\d,]+(?:\.\d+)?)',
+        re.IGNORECASE,
+    )
+
+    columns = [
+        ("Alert ID", "id"),
+        ("Match Status", "match_status"),
+        ("Match Score", "match_score"),
+        ("Match Reason", "matched_reason"),
+        ("Seen At", "seen_at"),
+        ("Alert Created", "created_at"),
+        ("Source Type", "source_notice_type"),
+        ("Source Title", "source_title"),
+        ("Source Project ID", "source_project_id"),
+        ("Source Project Name", "source_project_name"),
+        ("Source Country", "source_country"),
+        ("Source Borrower", "source_borrower"),
+        ("Source Notice Date", "source_notice_date"),
+        ("Source URL", "source_url"),
+        ("Award Type", "award_notice_type"),
+        ("Award Title", "award_title"),
+        ("Award Project ID", "award_project_id"),
+        ("Award Project Name", "award_project_name"),
+        ("Award Country", "award_country"),
+        ("Award Borrower", "award_borrower"),
+        ("Award Notice Date", "award_notice_date"),
+        ("Award URL", "award_url"),
+        ("Awarded Bidder(s)", "awarded_bidders"),
+        ("Award Amount", "award_amount"),
+        ("Award Currency", "award_currency"),
+    ]
+
+    def generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([label for label, _ in columns])
+        yield buf.getvalue()
+
+        with db() as conn:
+            with conn.cursor(name="award_alerts_export_cur") as cur:
+                cur.itersize = 2000
+                cur.execute(sql, params)
+                while True:
+                    batch = cur.fetchmany(2000)
+                    if not batch:
+                        break
+                    buf.seek(0)
+                    buf.truncate()
+                    for row in batch:
+                        if row.get("award_amount") is None:
+                            desc = row.get("award_description") or ""
+                            m = amount_re.search(desc)
+                            if m:
+                                try:
+                                    row["award_amount"] = float(m.group(1).replace(",", ""))
+                                except (ValueError, TypeError):
+                                    pass
+                            else:
+                                m2 = re.search(r'([\d,]+(?:\.\d+)?)\s*(?:USD|US\$)', desc)
+                                if m2:
+                                    try:
+                                        row["award_amount"] = float(m2.group(1).replace(",", ""))
+                                        if not row.get("award_currency"):
+                                            row["award_currency"] = "USD"
+                                    except (ValueError, TypeError):
+                                        pass
+                        writer.writerow([row.get(key, "") for _, key in columns])
+                    yield buf.getvalue()
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    filename = f"WB_Award_Alerts_{timestamp}.csv"
+    return StreamingResponse(
+        generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.put("/api/award-alerts/{alert_id}/seen")
@@ -2953,65 +3116,91 @@ def list_bidders(
 
 
 BIDDER_EXPORT_FIELDS = {
-    "name": ("Bidder Name", "name", 40),
-    "country": ("Country of Origin", "country", 20),
-    "category": ("Category", "category", 24),
-    "bid_count": ("Total Bids", "bid_count", 14),
-    "won_count": ("Won Bids", "won_count", 14),
-    "total_bid_amount": ("Total Bid Amount", "total_bid_amount", 18),
-    "primary_currency": ("Currency", "primary_currency", 12),
-    "last_bid_date": ("Last Bid Date", "last_bid_date", 16),
-    "latest_bid_title": ("Latest Bid", "latest_bid_title", 50),
-    "contact_name": ("Contact Name", "contact_name", 24),
-    "contact_email": ("Contact Email", "contact_email", 30),
-    "contact_phone": ("Contact Phone", "contact_phone", 20),
-    "contact_org": ("Organisation", "contact_org", 30),
-    "business_model": ("Business Model", "business_model", 30),
-    "core_products": ("Core Products", "core_products", 30),
-    "corporate_activities": ("Corporate Activities", "corporate_activities", 40),
+    "c": ("#", "c", 5),
+    "name": ("Company", "name", 40),
+    "country": ("Supplier Country", "country", 20),
+    "project_country": ("Project Country / Region", "project_country", 22),
+    "project_id": ("Project ID", "project_id", 18),
+    "contract_reference": ("Contract Reference", "contract_reference", 20),
+    "title": ("Contract / Scope", "title", 50),
+    "award_date": ("Award Date", "award_date", 15),
+    "currency": ("Currency", "currency", 10),
+    "contract_value": ("Contract Value", "contract_value", 20),
+    "company_website": ("Company Website", "company_website", 25),
+    "url": ("World Bank Award Notice", "url", 25),
+    "notes": ("Notes", "notes", 30),
 }
 
 
 def resolve_bidder_export_fields(fields: Optional[str]) -> List[str]:
     selected_fields = [f.strip() for f in (fields or "").split(",") if f.strip()]
     if not selected_fields:
-        return ["name", "country", "category", "bid_count", "won_count", "total_bid_amount", "primary_currency", "last_bid_date"]
+        return ["c", "name", "country", "project_country", "project_id",
+                "contract_reference", "title", "award_date", "currency",
+                "contract_value", "company_website", "url", "notes"]
     return [field for field in selected_fields if field in BIDDER_EXPORT_FIELDS]
 
 
 def fetch_bidder_export_rows(search: Optional[str], qs: Optional[str], country: Optional[str], won_only: bool, tech_only: bool = False):
     where, params = build_bidder_filters(search, qs, country, tech_only)
-    having = "HAVING COUNT(CASE WHEN ba.won THEN 1 END) > 0" if won_only else ""
-    return q(f"""
+    rows = q(f"""
         SELECT
             b.name,
             b.country,
-            b.category,
-            b.contact_name,
-            b.contact_email,
-            b.contact_phone,
-            b.contact_org,
-            b.business_model,
-            b.core_products,
-            b.corporate_activities,
-            COUNT(ba.id)                       AS bid_count,
-            COUNT(CASE WHEN ba.won THEN 1 END) AS won_count,
-            COALESCE(SUM(ba.award_amount), 0)  AS total_bid_amount,
-            MAX(NULLIF(ba.currency, ''))       AS primary_currency,
-            MAX(ba.award_date)::text           AS last_bid_date,
-            (SELECT pn.title
-             FROM bidder_awards ba2
-             JOIN procurement_notices pn ON pn.id = ba2.notice_id
-             WHERE ba2.bidder_id = b.id
-             ORDER BY ba2.award_date DESC NULLS LAST
-             LIMIT 1) AS latest_bid_title
+            w.project_country,
+            w.project_id,
+            w.contract_reference,
+            w.title,
+            w.award_date,
+            w.currency,
+            w.contract_value,
+            w.url
         FROM bidders b
-        LEFT JOIN bidder_awards ba ON ba.bidder_id = b.id
+        LEFT JOIN LATERAL (
+            SELECT
+                pn.country   AS project_country,
+                pn.project_id,
+                pn.borrower_bid_reference AS contract_reference,
+                pn.title,
+                ba.award_date::text AS award_date,
+                ba.currency,
+                ba.award_amount AS contract_value,
+                CASE
+                    WHEN pn.url IS NOT NULL AND pn.url <> '' AND pn.url <> 'https://projects.worldbank.org/en/projects-operations/procurement'
+                    THEN pn.url
+                    ELSE 'https://projects.worldbank.org/en/projects-operations/procurement-detail/' || pn.id
+                END AS url
+            FROM bidder_awards ba
+            JOIN procurement_notices pn ON pn.id = ba.notice_id
+            WHERE ba.bidder_id = b.id AND ba.won = TRUE
+            ORDER BY ba.award_date DESC NULLS LAST
+            LIMIT 1
+        ) w ON TRUE
         WHERE {where}
-        GROUP BY b.id
-        {having}
-        ORDER BY bid_count DESC, b.name ASC
+        ORDER BY b.name ASC
     """, params)
+    if won_only:
+        rows = [r for r in rows if r.get("award_date")]
+    for idx, row in enumerate(rows, 1):
+        row["c"] = idx
+        row["company_website"] = None
+        row["notes"] = None
+    return rows
+
+
+def _write_bidder_export_sheet(ws, selected_fields: List[str], rows) -> None:
+    for col_idx, field in enumerate(selected_fields, 1):
+        label, _, width = BIDDER_EXPORT_FIELDS[field]
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+        cell = ws.cell(row=1, column=col_idx, value=label)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F5F43")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    for row_idx, row in enumerate(rows, 2):
+        for col_idx, field in enumerate(selected_fields, 1):
+            value = row.get(BIDDER_EXPORT_FIELDS[field][1])
+            ws.cell(row=row_idx, column=col_idx, value=value)
 
 
 @app.get("/api/bidders/export")
@@ -3027,21 +3216,31 @@ def export_bidders_excel(
     rows = fetch_bidder_export_rows(search, qs, country, won_only, tech_only)
 
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Bidders"
+    default = wb.active
+    wb.remove(default)
 
-    for col_idx, field in enumerate(selected_fields, 1):
-        label, _, width = BIDDER_EXPORT_FIELDS[field]
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
-        cell = ws.cell(row=1, column=col_idx, value=label)
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="1F5F43")
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    rows_by_country: Dict[str, list] = {}
+    for row in rows:
+        country_key = (row.get("country") or "").strip() or "Unknown"
+        rows_by_country.setdefault(country_key, []).append(row)
 
-    for row_idx, row in enumerate(rows, 2):
-        for col_idx, field in enumerate(selected_fields, 1):
-            value = row.get(BIDDER_EXPORT_FIELDS[field][1])
-            ws.cell(row=row_idx, column=col_idx, value=value)
+    used_titles = set()
+    for index, country in enumerate(sorted(rows_by_country), 1):
+        base_title = _safe_sheet_title(country, f"Country {index}")
+        title = base_title
+        suffix = 2
+        while title.lower() in used_titles:
+            tail = f" {suffix}"
+            title = f"{base_title[:31 - len(tail)]}{tail}"
+            suffix += 1
+        used_titles.add(title.lower())
+
+        ws = wb.create_sheet(title)
+        _write_bidder_export_sheet(ws, selected_fields, rows_by_country[country])
+
+    if not wb.worksheets:
+        ws = wb.create_sheet("Bidders")
+        _write_bidder_export_sheet(ws, selected_fields, [])
 
     buf = io.BytesIO()
     wb.save(buf)

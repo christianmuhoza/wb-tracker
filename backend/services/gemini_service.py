@@ -1,9 +1,10 @@
-import os
-import time
 import json
 import logging
+import os
+import time
+from typing import Any
+
 import requests
-from typing import Dict, Any, List, Optional
 from services.contact_enrichment import _search_tavily
 
 logger = logging.getLogger(__name__)
@@ -13,10 +14,8 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
 
 def classify_and_enrich_with_gemini(
-    company: str,
-    country: str = "",
-    bids: List[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+    company: str, country: str = "", bids: list[dict[str, Any]] = None
+) -> dict[str, Any]:
     """
     Enrich bidder information using Gemini LLM.
     Combines Tavily web search results, bid history, and company name/country.
@@ -44,7 +43,7 @@ def classify_and_enrich_with_gemini(
             won = "Won" if b.get("won") else "Participated"
             amount = f"{b.get('bid_amount') or b.get('award_amount') or ''} {b.get('bid_currency') or b.get('currency') or ''}".strip()
             bid_list.append(f"- {title} (Role: {role}, Status: {won}, Amount: {amount})")
-    
+
     bids_context = "\n".join(bid_list) if bid_list else "No local bid history available."
 
     # 3. Build Prompt
@@ -55,13 +54,13 @@ def classify_and_enrich_with_gemini(
         "Analyze the company's business model, core products, and corporate activities.\n"
         "You MUST return a JSON object matching this schema:\n"
         "{\n"
-        "  \"category\": \"Software Development\" | \"Construction & Civil Engineering\" | \"General Trading, Wholesale, & Institutional Procurement\" | \"Consulting & Advisory Services\" | \"ICT Hardware & Networking\" | \"Other\",\n"
-        "  \"business_model\": \"A brief description of their business model (1-2 sentences).\",\n"
-        "  \"core_products\": \"A brief list/description of their core products/services.\",\n"
-        "  \"corporate_activities\": \"A brief summary of their main corporate activities.\",\n"
-        "  \"contact_email\": \"The official contact email address of the company. Scan the web search results carefully for a real, specific email address (e.g. info@company.com or office@company.com). Avoid placeholder domains (like example.com or domain.com) or unrelated domain webmaster emails. If none is explicitly found, construct a standard info@ or contact@ email using their official website domain (if one is clearly listed in the search results). Otherwise, return null.\",\n"
-        "  \"contact_phone\": \"The official company contact phone number (including country code) extracted from the search results, or null.\",\n"
-        "  \"linkedin_url\": \"Official LinkedIn company profile URL if found in the search results, or null.\"\n"
+        '  "category": "Software Development" | "Construction & Civil Engineering" | "General Trading, Wholesale, & Institutional Procurement" | "Consulting & Advisory Services" | "ICT Hardware & Networking" | "Other",\n'
+        '  "business_model": "A brief description of their business model (1-2 sentences).",\n'
+        '  "core_products": "A brief list/description of their core products/services.",\n'
+        '  "corporate_activities": "A brief summary of their main corporate activities.",\n'
+        '  "contact_email": "The official contact email address of the company. Scan the web search results carefully for a real, specific email address (e.g. info@company.com or office@company.com). Avoid placeholder domains (like example.com or domain.com) or unrelated domain webmaster emails. If none is explicitly found, construct a standard info@ or contact@ email using their official website domain (if one is clearly listed in the search results). Otherwise, return null.",\n'
+        '  "contact_phone": "The official company contact phone number (including country code) extracted from the search results, or null.",\n'
+        '  "linkedin_url": "Official LinkedIn company profile URL if found in the search results, or null."\n'
         "}\n"
         "Choose the classification category strictly from the provided list. Ensure it accurately reflects the company's core operations.\n"
         "Ensure the response is valid JSON and contains only the JSON object."
@@ -76,20 +75,10 @@ def classify_and_enrich_with_gemini(
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    
+
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": f"{system_instruction}\n\n{prompt}"
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json"
-        }
+        "contents": [{"parts": [{"text": f"{system_instruction}\n\n{prompt}"}]}],
+        "generationConfig": {"responseMimeType": "application/json"},
     }
 
     max_retries = 4
@@ -97,12 +86,11 @@ def classify_and_enrich_with_gemini(
     for attempt in range(max_retries):
         try:
             resp = requests.post(url, json=payload, timeout=30)
-            if resp.status_code in (429, 503):
-                if attempt < max_retries - 1:
-                    logger.warning(f"Gemini API returned {resp.status_code}. Retrying in {backoff} seconds...")
-                    time.sleep(backoff)
-                    backoff *= 2
-                    continue
+            if resp.status_code in (429, 503) and attempt < max_retries - 1:
+                logger.warning(f"Gemini API returned {resp.status_code}. Retrying in {backoff} seconds...")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
             resp.raise_for_status()
             result_data = resp.json()
             break
@@ -120,4 +108,4 @@ def classify_and_enrich_with_gemini(
         return enriched_info
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         logger.error(f"Failed to parse Gemini response: {e}. Raw response: {result_data}")
-        raise ValueError("Invalid response format received from Gemini API.")
+        raise ValueError("Invalid response format received from Gemini API.") from e

@@ -3,7 +3,7 @@
 import json
 import os
 import time
-from typing import Any, Dict
+from typing import Any
 
 import requests
 
@@ -20,14 +20,18 @@ def _clean_text(value: Any) -> str | None:
     return text[:500] if text else None
 
 
-def _notice_context(notice: Dict[str, Any]) -> str:
-    fields = (("Title", notice.get("title")), ("Description", notice.get("description")),
-              ("Project", notice.get("project_name")), ("Procurement method", notice.get("procurement_method")),
-              ("Buyer reference", notice.get("borrower_bid_reference")))
+def _notice_context(notice: dict[str, Any]) -> str:
+    fields = (
+        ("Title", notice.get("title")),
+        ("Description", notice.get("description")),
+        ("Project", notice.get("project_name")),
+        ("Procurement method", notice.get("procurement_method")),
+        ("Buyer reference", notice.get("borrower_bid_reference")),
+    )
     return "\n".join(f"{label}: {value}" for label, value in fields if value)
 
 
-def classify_software_opportunity_with_gemini(notice: Dict[str, Any]) -> Dict[str, Any]:
+def classify_software_opportunity_with_gemini(notice: dict[str, Any]) -> dict[str, Any]:
     """Classify by requested deliverable; product categories are deliberately open-ended."""
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY environment variable is not configured.")
@@ -38,13 +42,16 @@ def classify_software_opportunity_with_gemini(notice: Dict[str, Any]) -> Dict[st
 {"is_software_related":true,"work_type":"new_build|enhancement|integration|implementation|support|other","product_category":"concise reusable category inferred from the deliverable, or null","product_name":"specific solution/product sought, or null","confidence":"high|medium|low","reason":"concise evidence-based explanation"}
 Product categories are open-ended; describe unfamiliar domain systems accurately rather than forcing a fixed taxonomy."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": f"{instruction}\n\nNOTICE:\n{context}"}]}], "generationConfig": {"responseMimeType": "application/json"}}
+    payload = {
+        "contents": [{"parts": [{"text": f"{instruction}\n\nNOTICE:\n{context}"}]}],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
     for attempt in range(3):
         response = requests.post(url, json=payload, timeout=45)
         if response.status_code not in (429, 503) or attempt == 2:
             response.raise_for_status()
             break
-        time.sleep(2 ** attempt)
+        time.sleep(2**attempt)
     try:
         result = json.loads(response.json()["candidates"][0]["content"]["parts"][0]["text"].strip())
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:

@@ -1,8 +1,8 @@
 """Bidder extraction from World Bank procurement notice descriptions."""
 
-import re
 import json
-from typing import Optional, List, Dict, Any, Tuple
+import re
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
@@ -11,22 +11,43 @@ from bs4 import BeautifulSoup
 def _clean_name(text: str) -> str:
     """Strip noise and return a clean company name, or empty string."""
     if not text:
-        return ''
-    text = re.sub(r'^[\d\.\-\|\*\#\s]+', '', text.strip())
-    text = re.sub(r'^(?:[A-Z]{2,4}\s+[\d,]+(?:\.\d+)?\s+)+', '', text.strip())
-    text = re.sub(r'[\.\,\;\:\!\?]+$', '', text.strip())
-    text = re.sub(r'\s+', ' ', text).strip()
+        return ""
+    text = re.sub(r"^[\d\.\-\|\*\#\s]+", "", text.strip())
+    text = re.sub(r"^(?:[A-Z]{2,4}\s+[\d,]+(?:\.\d+)?\s+)+", "", text.strip())
+    text = re.sub(r"[\.\,\;\:\!\?]+$", "", text.strip())
+    text = re.sub(r"\s+", " ", text).strip()
     if len(text) < 4:
-        return ''
+        return ""
     NOISE_WORDS = {
-        'n/a', 'none', 'nil', 'not applicable', 'tbd', 'pending',
-        'bid amount', 'firm name', 'company name', 'bidder name',
-        'name', 'amount', 'currency', 'usd', 'eur', 'description',
-        'evaluated', 'awarded', 'selected', 'contract', 'procurement',
-        'total', 'subtotal', 'price', 'cost', 'value',
+        "n/a",
+        "none",
+        "nil",
+        "not applicable",
+        "tbd",
+        "pending",
+        "bid amount",
+        "firm name",
+        "company name",
+        "bidder name",
+        "name",
+        "amount",
+        "currency",
+        "usd",
+        "eur",
+        "description",
+        "evaluated",
+        "awarded",
+        "selected",
+        "contract",
+        "procurement",
+        "total",
+        "subtotal",
+        "price",
+        "cost",
+        "value",
     }
     if text.lower() in NOISE_WORDS:
-        return ''
+        return ""
     return text
 
 
@@ -43,36 +64,65 @@ def _dedupe(names: list) -> list:
 
 
 AWARD_BIDDER_SECTION_SPECS = [
-    ("awarded", re.compile(r'Awarded\s+(?:Firm|Company|Bidder|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]', re.IGNORECASE)),
-    ("evaluated", re.compile(r'Evaluated\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]', re.IGNORECASE)),
-    ("rejected", re.compile(r'Rejected\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]', re.IGNORECASE)),
-    ("unsuccessful", re.compile(r'Unsuccessful\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]', re.IGNORECASE)),
-    ("disqualified", re.compile(r'Disqualified\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]', re.IGNORECASE)),
-    ("responsive", re.compile(r'Responsive\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]', re.IGNORECASE)),
-    ("participating", re.compile(r'Participating\s+(?:Firms?|Bidders?|Companies|Contractors|Suppliers)\s*[:\-]', re.IGNORECASE)),
+    (
+        "awarded",
+        re.compile(r"Awarded\s+(?:Firm|Company|Bidder|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]", re.IGNORECASE),
+    ),
+    (
+        "evaluated",
+        re.compile(
+            r"Evaluated\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]", re.IGNORECASE
+        ),
+    ),
+    (
+        "rejected",
+        re.compile(r"Rejected\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]", re.IGNORECASE),
+    ),
+    (
+        "unsuccessful",
+        re.compile(
+            r"Unsuccessful\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]", re.IGNORECASE
+        ),
+    ),
+    (
+        "disqualified",
+        re.compile(
+            r"Disqualified\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]", re.IGNORECASE
+        ),
+    ),
+    (
+        "responsive",
+        re.compile(
+            r"Responsive\s+(?:Firm|Bidder|Company|Contractor|Consultant|Supplier)\(?s?\)?\s*[:\-]", re.IGNORECASE
+        ),
+    ),
+    (
+        "participating",
+        re.compile(r"Participating\s+(?:Firms?|Bidders?|Companies|Contractors|Suppliers)\s*[:\-]", re.IGNORECASE),
+    ),
 ]
 
 AWARD_SECTION_STOP_MARKERS = [
-    re.compile(r'Country\s*:', re.IGNORECASE),
-    re.compile(r'Registry\s+ID\s*:', re.IGNORECASE),
-    re.compile(r'Beneficial\s+Ownership', re.IGNORECASE),
-    re.compile(r'Bid\s+Price\s+at\s+Opening', re.IGNORECASE),
-    re.compile(r'Evaluated\s+Bid\s+Price', re.IGNORECASE),
-    re.compile(r'Signed\s+Contract\s+Price', re.IGNORECASE),
-    re.compile(r'Final\s+Evaluation\s+Price', re.IGNORECASE),
-    re.compile(r'Reason\s+for\s+Rejection', re.IGNORECASE),
-    re.compile(r'Scores?\s+', re.IGNORECASE),
-    re.compile(r'Rank\s*:', re.IGNORECASE),
-    re.compile(r'Price\s*:\s*Currency', re.IGNORECASE),
+    re.compile(r"Country\s*:", re.IGNORECASE),
+    re.compile(r"Registry\s+ID\s*:", re.IGNORECASE),
+    re.compile(r"Beneficial\s+Ownership", re.IGNORECASE),
+    re.compile(r"Bid\s+Price\s+at\s+Opening", re.IGNORECASE),
+    re.compile(r"Evaluated\s+Bid\s+Price", re.IGNORECASE),
+    re.compile(r"Signed\s+Contract\s+Price", re.IGNORECASE),
+    re.compile(r"Final\s+Evaluation\s+Price", re.IGNORECASE),
+    re.compile(r"Reason\s+for\s+Rejection", re.IGNORECASE),
+    re.compile(r"Scores?\s+", re.IGNORECASE),
+    re.compile(r"Rank\s*:", re.IGNORECASE),
+    re.compile(r"Price\s*:\s*Currency", re.IGNORECASE),
 ]
 
 NAME_WITH_ID_RE = re.compile(r'[A-Z0-9&.,\'"/\-]+(?:\s+[A-Z0-9&.,\'"/\-]+)*\s*\(\d{4,}\)')
-COUNTRY_LINE_RE = re.compile(r'^Country\s*:\s*(.+)$', re.IGNORECASE)
+COUNTRY_LINE_RE = re.compile(r"^Country\s*:\s*(.+)$", re.IGNORECASE)
 AMOUNT_LINE_LABELS = {
-    "opening_amount": re.compile(r'^Bid\s+Price\s+at\s+Opening\s*:?\s*(.*)$', re.IGNORECASE),
-    "evaluated_amount": re.compile(r'^Evaluated\s+Bid\s+Price\s*:?\s*(.*)$', re.IGNORECASE),
-    "signed_amount": re.compile(r'^Signed\s+Contract\s+Price\s*:?\s*(.*)$', re.IGNORECASE),
-    "final_amount": re.compile(r'^Final\s+Evaluation\s+Price\s*:?\s*(.*)$', re.IGNORECASE),
+    "opening_amount": re.compile(r"^Bid\s+Price\s+at\s+Opening\s*:?\s*(.*)$", re.IGNORECASE),
+    "evaluated_amount": re.compile(r"^Evaluated\s+Bid\s+Price\s*:?\s*(.*)$", re.IGNORECASE),
+    "signed_amount": re.compile(r"^Signed\s+Contract\s+Price\s*:?\s*(.*)$", re.IGNORECASE),
+    "final_amount": re.compile(r"^Final\s+Evaluation\s+Price\s*:?\s*(.*)$", re.IGNORECASE),
 }
 
 
@@ -80,7 +130,7 @@ def _extract_bidder_names_from_block(text: str) -> list:
     """Extract repeated bidder/company names from a single award section block."""
     if not text:
         return []
-    normalized = re.sub(r'\s+', ' ', text).strip()
+    normalized = re.sub(r"\s+", " ", text).strip()
     names = []
     for match in NAME_WITH_ID_RE.finditer(normalized):
         name = _clean_name(match.group(0).strip())
@@ -89,25 +139,25 @@ def _extract_bidder_names_from_block(text: str) -> list:
     return _dedupe(names)
 
 
-def _clean_award_lines(text: str) -> List[str]:
+def _clean_award_lines(text: str) -> list[str]:
     lines = []
     for raw_line in (text or "").splitlines():
-        line = re.sub(r'^[\u2022\u25cf\u25aa\u25e6\uf0d8\-\*\t ]+', '', raw_line).strip()
-        line = re.sub(r'\s+', ' ', line)
+        line = re.sub(r"^[\u2022\u25cf\u25aa\u25e6\uf0d8\-\*\t ]+", "", raw_line).strip()
+        line = re.sub(r"\s+", " ", line)
         if line:
             lines.append(line)
     return lines
 
 
-def _parse_amount_value(text: str) -> tuple[Optional[float], Optional[str]]:
+def _parse_amount_value(text: str) -> tuple[float | None, str | None]:
     if not text:
         return None, None
-    normalized = re.sub(r'\s+', ' ', text).strip()
-    match = re.search(r'([A-Z][A-Z\.\- ]{1,20})\s+([\d,]+(?:\.\d+)?)', normalized)
+    normalized = re.sub(r"\s+", " ", text).strip()
+    match = re.search(r"([A-Z][A-Z\.\- ]{1,20})\s+([\d,]+(?:\.\d+)?)", normalized)
     if not match:
         return None, None
-    currency = re.sub(r'\s+', ' ', match.group(1)).strip(" :")
-    amount_text = match.group(2).replace(',', '')
+    currency = re.sub(r"\s+", " ", match.group(1)).strip(" :")
+    amount_text = match.group(2).replace(",", "")
     try:
         amount = float(amount_text)
     except ValueError:
@@ -115,26 +165,38 @@ def _parse_amount_value(text: str) -> tuple[Optional[float], Optional[str]]:
     return amount, currency or None
 
 
-def _infer_notice_category(notice: Dict[str, Any], description: str = "") -> Optional[str]:
-    reference = " ".join(filter(None, [
-        str(notice.get("borrower_bid_reference") or ""),
-        str(notice.get("title") or ""),
-        str(notice.get("procurement_method") or ""),
-        str(description or ""),
-    ])).lower()
+def _infer_notice_category(notice: dict[str, Any], description: str = "") -> str | None:
+    reference = " ".join(
+        filter(
+            None,
+            [
+                str(notice.get("borrower_bid_reference") or ""),
+                str(notice.get("title") or ""),
+                str(notice.get("procurement_method") or ""),
+                str(description or ""),
+            ],
+        )
+    ).lower()
 
     if any(token in reference for token in ("-cw-", "construction", "rehabilitation", "civil works", "works")):
         return "Works"
-    if any(token in reference for token in ("-go-", "supply of", "goods", "equipment", "vehicle", "camera", "computers", "furniture")):
+    if any(
+        token in reference
+        for token in ("-go-", "supply of", "goods", "equipment", "vehicle", "camera", "computers", "furniture")
+    ):
         return "Goods"
-    if any(token in reference for token in ("-cs-", "consultant", "consulting", "cqs", "qcbs", "individual consultant")):
+    if any(
+        token in reference for token in ("-cs-", "consultant", "consulting", "cqs", "qcbs", "individual consultant")
+    ):
         return "Consulting Services"
-    if any(token in reference for token in ("-nc-", "non-consult", "service", "training", "maintenance", "installation")):
+    if any(
+        token in reference for token in ("-nc-", "non-consult", "service", "training", "maintenance", "installation")
+    ):
         return "Non-Consulting Services"
     return None
 
 
-def _merge_categories(existing: Optional[str], new_value: Optional[str]) -> Optional[str]:
+def _merge_categories(existing: str | None, new_value: str | None) -> str | None:
     values = []
     for raw in (existing, new_value):
         if not raw:
@@ -146,16 +208,16 @@ def _merge_categories(existing: Optional[str], new_value: Optional[str]) -> Opti
     return ", ".join(values) if values else None
 
 
-def parse_notice_bidder_details(text: str) -> List[Dict[str, Any]]:
+def parse_notice_bidder_details(text: str) -> list[dict[str, Any]]:
     """Parse structured Contract Award bidder sections into bidder-level records."""
     lines = _clean_award_lines(text)
     if not lines:
         return []
 
     section_alias = {name: name for name, _ in AWARD_BIDDER_SECTION_SPECS}
-    details: List[Dict[str, Any]] = []
-    current_section: Optional[str] = None
-    current: Optional[Dict[str, Any]] = None
+    details: list[dict[str, Any]] = []
+    current_section: str | None = None
+    current: dict[str, Any] | None = None
 
     def start_bidder(name: str):
         nonlocal current
@@ -236,15 +298,19 @@ def parse_notice_bidder_details(text: str) -> List[Dict[str, Any]]:
         seen.add(key)
         section = item.get("section")
         preferences = (
-            ("signed_amount", "signed_currency"),
-            ("final_amount", "final_currency"),
-            ("evaluated_amount", "evaluated_currency"),
-            ("opening_amount", "opening_currency"),
-        ) if section == "awarded" else (
-            ("evaluated_amount", "evaluated_currency"),
-            ("final_amount", "final_currency"),
-            ("opening_amount", "opening_currency"),
-            ("signed_amount", "signed_currency"),
+            (
+                ("signed_amount", "signed_currency"),
+                ("final_amount", "final_currency"),
+                ("evaluated_amount", "evaluated_currency"),
+                ("opening_amount", "opening_currency"),
+            )
+            if section == "awarded"
+            else (
+                ("evaluated_amount", "evaluated_currency"),
+                ("final_amount", "final_currency"),
+                ("opening_amount", "opening_currency"),
+                ("signed_amount", "signed_currency"),
+            )
         )
         chosen_amount = None
         chosen_currency = None
@@ -253,32 +319,34 @@ def parse_notice_bidder_details(text: str) -> List[Dict[str, Any]]:
                 chosen_amount = item.get(amount_key)
                 chosen_currency = item.get(currency_key)
                 break
-        finalized.append({
-            "name": name,
-            "section": section,
-            "country": item.get("country"),
-            "opening_amount": item.get("opening_amount"),
-            "opening_currency": item.get("opening_currency"),
-            "evaluated_amount": item.get("evaluated_amount"),
-            "evaluated_currency": item.get("evaluated_currency"),
-            "signed_amount": item.get("signed_amount"),
-            "signed_currency": item.get("signed_currency"),
-            "final_amount": item.get("final_amount"),
-            "final_currency": item.get("final_currency"),
-            "amount": chosen_amount,
-            "currency": chosen_currency,
-            "role": section.replace("_", " ").title() if section else None,
-        })
+        finalized.append(
+            {
+                "name": name,
+                "section": section,
+                "country": item.get("country"),
+                "opening_amount": item.get("opening_amount"),
+                "opening_currency": item.get("opening_currency"),
+                "evaluated_amount": item.get("evaluated_amount"),
+                "evaluated_currency": item.get("evaluated_currency"),
+                "signed_amount": item.get("signed_amount"),
+                "signed_currency": item.get("signed_currency"),
+                "final_amount": item.get("final_amount"),
+                "final_currency": item.get("final_currency"),
+                "amount": chosen_amount,
+                "currency": chosen_currency,
+                "role": section.replace("_", " ").title() if section else None,
+            }
+        )
 
     return finalized
 
 
-def _extract_bidders_by_section(text: str) -> Dict[str, List[str]]:
+def _extract_bidders_by_section(text: str) -> dict[str, list[str]]:
     """Parse structured award sections and return bidder names by section label."""
     if not text:
         return {}
 
-    normalized = re.sub(r'\s+', ' ', text).strip()
+    normalized = re.sub(r"\s+", " ", text).strip()
     matches = []
     for section_name, pattern in AWARD_BIDDER_SECTION_SPECS:
         for match in pattern.finditer(normalized):
@@ -288,7 +356,7 @@ def _extract_bidders_by_section(text: str) -> Dict[str, List[str]]:
         return {}
 
     matches.sort(key=lambda item: item[0])
-    sections: Dict[str, List[str]] = {}
+    sections: dict[str, list[str]] = {}
 
     for index, (_, block_start, section_name) in enumerate(matches):
         next_start = matches[index + 1][0] if index + 1 < len(matches) else len(normalized)
@@ -308,7 +376,7 @@ def _extract_from_json(data, depth=0) -> list:
     results = []
     if isinstance(data, dict):
         for key, val in data.items():
-            if any(kw in key.lower() for kw in ('firm', 'bidder', 'company', 'contractor', 'supplier')):
+            if any(kw in key.lower() for kw in ("firm", "bidder", "company", "contractor", "supplier")):
                 if isinstance(val, str) and len(val) > 3:
                     name = _clean_name(val)
                     if name:
@@ -332,48 +400,50 @@ def extract_bidders_list(text: str) -> list:
     section_bidders = _extract_bidders_by_section(text)
     if section_bidders:
         ordered = []
-        for section_name in ("awarded", "evaluated", "rejected", "unsuccessful", "disqualified", "responsive", "participating"):
+        for section_name in (
+            "awarded",
+            "evaluated",
+            "rejected",
+            "unsuccessful",
+            "disqualified",
+            "responsive",
+            "participating",
+        ):
             ordered.extend(section_bidders.get(section_name, []))
         if ordered:
             return _dedupe(ordered)
 
     found = []
 
-    for m in re.finditer(
-        r'Bidder\s*\d+\s*[:\.\-]\s*(.+?)(?=\n|Bidder\s*\d+|$)',
-        text, flags=re.IGNORECASE
-    ):
+    for m in re.finditer(r"Bidder\s*\d+\s*[:\.\-]\s*(.+?)(?=\n|Bidder\s*\d+|$)", text, flags=re.IGNORECASE):
         name = _clean_name(m.group(1))
         if name:
             found.append(name)
 
     label_patterns = [
-        r'Awarded\s+(?:Firm|Company|Bidder|Contractor|Consultant|Supplier)\(?s?\)?[:\-]\s*(.+)',
-        r'Evaluated\s+(?:Firm|Bidder|Company)\(?s?\)?[:\-]\s*(.+)',
-        r'Selected\s+(?:Firm|Company|Bidder|Contractor)\(?s?\)?[:\-]\s*(.+)',
-        r'Participating\s+(?:Firms?|Bidders?|Companies)\s*[:\-]\s*(.+)',
-        r'(?:Firm|Company|Contractor|Consultant|Supplier)\s+Name\s*[:\-]\s*(.+)',
+        r"Awarded\s+(?:Firm|Company|Bidder|Contractor|Consultant|Supplier)\(?s?\)?[:\-]\s*(.+)",
+        r"Evaluated\s+(?:Firm|Bidder|Company)\(?s?\)?[:\-]\s*(.+)",
+        r"Selected\s+(?:Firm|Company|Bidder|Contractor)\(?s?\)?[:\-]\s*(.+)",
+        r"Participating\s+(?:Firms?|Bidders?|Companies)\s*[:\-]\s*(.+)",
+        r"(?:Firm|Company|Contractor|Consultant|Supplier)\s+Name\s*[:\-]\s*(.+)",
     ]
     for pat in label_patterns:
         for m in re.finditer(pat, text, flags=re.IGNORECASE | re.MULTILINE):
             block = m.group(1).strip()
-            for part in re.split(r'[;\n]', block):
+            for part in re.split(r"[;\n]", block):
                 name = _clean_name(part)
                 if name and len(name) > 3:
                     found.append(name)
 
-    for m in re.finditer(
-        r'^\s*\d+\s*[\|\.]\s*([A-Z][A-Za-z\s&\.,\-\(\)\']{3,}?)\s*[\|,]',
-        text, flags=re.MULTILINE
-    ):
+    for m in re.finditer(r"^\s*\d+\s*[\|\.]\s*([A-Z][A-Za-z\s&\.,\-\(\)\']{3,}?)\s*[\|,]", text, flags=re.MULTILINE):
         name = _clean_name(m.group(1))
         if name and len(name) > 3:
             found.append(name)
 
     if not found:
         award_patterns = [
-            r'contract\s+(?:was\s+)?awarded\s+to\s+([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)(?:\s+for|\s+in|\s+to|\.|,|$)',
-            r'([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)\s+(?:was\s+)?(?:selected|awarded|chosen)\s+(?:as\s+)?(?:the\s+)?(?:winning|successful)',
+            r"contract\s+(?:was\s+)?awarded\s+to\s+([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)(?:\s+for|\s+in|\s+to|\.|,|$)",
+            r"([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)\s+(?:was\s+)?(?:selected|awarded|chosen)\s+(?:as\s+)?(?:the\s+)?(?:winning|successful)",
         ]
         for pat in award_patterns:
             for m in re.finditer(pat, text, flags=re.IGNORECASE | re.MULTILINE):
@@ -403,15 +473,15 @@ def extract_awarded_bidders(text: str) -> list:
 
     winners = []
     winner_patterns = [
-        r'Awarded\s+(?:Firm|Company|Bidder|Contractor|Consultant|Supplier)\(?s?\)?[:\-]\s*(.+)',
-        r'Selected\s+(?:Firm|Company|Bidder|Contractor)\(?s?\)?[:\-]\s*(.+)',
-        r'contract\s+(?:was\s+)?awarded\s+to\s+([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)(?:\s+for|\s+in|\.|,|$)',
-        r'([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)\s+(?:was\s+)?(?:selected|awarded)\s+(?:as\s+)?(?:the\s+)?(?:winning|successful)',
+        r"Awarded\s+(?:Firm|Company|Bidder|Contractor|Consultant|Supplier)\(?s?\)?[:\-]\s*(.+)",
+        r"Selected\s+(?:Firm|Company|Bidder|Contractor)\(?s?\)?[:\-]\s*(.+)",
+        r"contract\s+(?:was\s+)?awarded\s+to\s+([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)(?:\s+for|\s+in|\.|,|$)",
+        r"([A-Z][A-Za-z\s&\.,\-\(\)\']{3,60}?)\s+(?:was\s+)?(?:selected|awarded)\s+(?:as\s+)?(?:the\s+)?(?:winning|successful)",
     ]
     for pat in winner_patterns:
         for m in re.finditer(pat, text, flags=re.IGNORECASE | re.MULTILINE):
             block = m.group(1).strip()
-            for part in re.split(r'[;\n]', block):
+            for part in re.split(r"[;\n]", block):
                 name = _clean_name(part)
                 if name and len(name) > 3:
                     winners.append(name)
@@ -435,7 +505,7 @@ def fetch_bidders_from_detail_page(notice_id: str, fallback_url: str = "") -> li
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; WBProcurementTracker/1.0)",
                 "Accept": "text/html,application/xhtml+xml",
-            }
+            },
         )
         resp.raise_for_status()
     except Exception:

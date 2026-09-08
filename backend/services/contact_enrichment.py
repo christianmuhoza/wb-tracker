@@ -1,15 +1,16 @@
+import logging
 import os
 import re
-import requests
-from typing import Optional, Dict, Any, List
+from typing import Any
 
-import logging
+import requests
+
 logger = logging.getLogger(__name__)
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 
-def _search_tavily(company: str, country: str = "") -> Optional[List[str]]:
+def _search_tavily(company: str, country: str = "") -> list[str] | None:
     if not TAVILY_API_KEY:
         return None
     query = f"{company} {country} contact email phone LinkedIn".strip()
@@ -44,12 +45,10 @@ EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_RE = re.compile(
     r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}(?:\s*(?:ext|extension|x)\s*\d{1,5})?"
 )
-LINKEDIN_RE = re.compile(
-    r"https?://(?:www\.)?linkedin\.com/(?:company|in)/[a-zA-Z0-9_-]+"
-)
+LINKEDIN_RE = re.compile(r"https?://(?:www\.)?linkedin\.com/(?:company|in)/[a-zA-Z0-9_-]+")
 
 
-def _extract_contact_info(texts: List[str]) -> Dict[str, Any]:
+def _extract_contact_info(texts: list[str]) -> dict[str, Any]:
     emails = set()
     phones = set()
     linkedins = set()
@@ -76,7 +75,7 @@ def _extract_contact_info(texts: List[str]) -> Dict[str, Any]:
             sorted_emails[0],
         )
     if phones:
-        filtered = [p for p in sorted(phones) if re.match(r'^[\+\(]?\d[\d\s\-\(\)\.]{6,}\d$', p.strip())]
+        filtered = [p for p in sorted(phones) if re.match(r"^[\+\(]?\d[\d\s\-\(\)\.]{6,}\d$", p.strip())]
         if filtered:
             result["contact_phone"] = ", ".join(filtered[:3])
     if linkedins:
@@ -84,7 +83,7 @@ def _extract_contact_info(texts: List[str]) -> Dict[str, Any]:
     return result
 
 
-def search_company_contact(company: str, country: str = "") -> Dict[str, Any]:
+def search_company_contact(company: str, country: str = "") -> dict[str, Any]:
     if not TAVILY_API_KEY:
         logger.warning("TAVILY_API_KEY not set. Set it in .env for contact enrichment.")
         return {}

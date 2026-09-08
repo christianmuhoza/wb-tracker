@@ -22,58 +22,59 @@ Usage:
     DB_PASSWORD=yourpassword
 """
 
+import logging
 import os
+import re
 import time
 import traceback
-import logging
-import requests
+from datetime import date, datetime, timedelta
+from logging.handlers import RotatingFileHandler
+
 import psycopg2
 import psycopg2.extras
-from psycopg2.extras import execute_values
-from datetime import datetime, date, timedelta
-from dotenv import load_dotenv
-from bs4 import BeautifulSoup
+import requests
 import schedule
+from bs4 import BeautifulSoup
+from config import DEFAULT_COUNTRIES as CONFIG_DEFAULT_COUNTRIES
+from dotenv import load_dotenv
+from psycopg2.extras import execute_values
 
 load_dotenv()
 
 log_handlers = [logging.StreamHandler()]
 try:
-    log_handlers.insert(0, logging.FileHandler("fetcher.log", encoding="utf-8"))
+    file_handler = RotatingFileHandler("fetcher.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    log_handlers.insert(0, file_handler)
 except OSError:
     pass
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=log_handlers
+    handlers=log_handlers,
 )
 log = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-API_BASE       = "https://search.worldbank.org/api/v2/procnotices"
-ABSOLUTE_START = date.today() - timedelta(days=730)   # Keep 2 years of history so lower-volume countries are not excluded
-ROWS_PER_PAGE  = 50
+API_BASE = "https://search.worldbank.org/api/v2/procnotices"
+ABSOLUTE_START = date.today() - timedelta(
+    days=730
+)  # Keep 2 years of history so lower-volume countries are not excluded
+ROWS_PER_PAGE = 50
 FALLBACK_ROWS_PER_PAGE = 10
-COUNTRY_BATCH  = 5                  # Countries per API request (avoids 500s)
-REQUEST_DELAY  = 1.2                # Seconds between batch calls
+COUNTRY_BATCH = 5  # Countries per API request (avoids 500s)
+REQUEST_DELAY = 1.2  # Seconds between batch calls
 
-FALLBACK_COUNTRIES = [
-    "Zambia", "Sierra Leone", "Ethiopia", "Malawi", "Kenya",
-    "Ghana", "Angola", "Central African Republic", "Guinea",
-    "Gambia", "Botswana", "Benin", "Somalia, Federal Republic of", "Tanzania", "Mozambique",
-    "Rwanda"
-]
+FALLBACK_COUNTRIES = list(CONFIG_DEFAULT_COUNTRIES)
 
 DB_CONFIG = {
-    "host":     os.getenv("DB_HOST",     "localhost"),
-    "port":     int(os.getenv("DB_PORT", 5432)),
-    "dbname":   os.getenv("DB_NAME",     "wb_tracker"),
-    "user":     os.getenv("DB_USER",     "postgres"),
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 5432)),
+    "dbname": os.getenv("DB_NAME", "wb_tracker"),
+    "user": os.getenv("DB_USER", "postgres"),
     "password": os.getenv("DB_PASSWORD", ""),
 }
-
 COUNTRY_QUERY_ALIASES = {
     "Gambia": ["Gambia, The"],
     "Somalia, Federal Republic of": ["Somalia", "Somalia, Federal Republic of", "Federal Republic of Somalia"],
@@ -88,6 +89,7 @@ COUNTRY_STORAGE_NORMALIZATION = {
 
 
 # ── Database helpers ──────────────────────────────────────────────────────────
+
 
 def get_connection():
     return psycopg2.connect(**DB_CONFIG)
@@ -107,19 +109,15 @@ def status_label(success: bool, row_count: int, fetched: int, error_msg: str | N
 
 def init_db():
     """Create all tables and indexes if they don't exist."""
-    ddl = """
+    countries_sql = ",".join(f"'{c.replace(chr(39), chr(39)+chr(39))}'" for c in CONFIG_DEFAULT_COUNTRIES)
+    ddl = f"""
     CREATE TABLE IF NOT EXISTS target_countries (
         id    SERIAL PRIMARY KEY,
         name  TEXT UNIQUE NOT NULL
     );
 
     INSERT INTO target_countries (name)
-    SELECT unnest(ARRAY[
-        'Zambia','Sierra Leone','Ethiopia','Malawi','Kenya',
-        'Ghana','Angola','Central African Republic','Guinea',
-        'Gambia','Botswana','Benin','Somalia, Federal Republic of','Tanzania','Mozambique',
-        'Rwanda'
-    ])
+    SELECT unnest(ARRAY[{countries_sql}])
     ON CONFLICT (name) DO NOTHING;
 
     DELETE FROM target_countries WHERE name IN ('Uganda');
@@ -204,10 +202,9 @@ def init_db():
 
 def get_target_countries() -> list[str]:
     """Read active countries from the target_countries table."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT name FROM target_countries ORDER BY name")
-            rows = cur.fetchall()
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT name FROM target_countries ORDER BY name")
+        rows = cur.fetchall()
     countries = [r[0] for r in rows]
     if not countries:
         log.warning("target_countries table is empty — using fallback list.")
@@ -216,26 +213,25 @@ def get_target_countries() -> list[str]:
 
 
 def get_app_settings() -> dict:
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cur.execute("""
-                INSERT INTO app_settings (key, value)
-                VALUES
-                    ('baseline_date', (CURRENT_DATE - INTERVAL '2 years')::text),
-                    ('country_batch', '5'),
-                    ('request_delay', '1.2'),
-                    ('auto_sync_hour', '06:00')
-                ON CONFLICT (key) DO NOTHING
-            """)
-            cur.execute("SELECT key, value FROM app_settings")
-            rows = cur.fetchall()
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            INSERT INTO app_settings (key, value)
+            VALUES
+                ('baseline_date', (CURRENT_DATE - INTERVAL '2 years')::text),
+                ('country_batch', '5'),
+                ('request_delay', '1.2'),
+                ('auto_sync_hour', '06:00')
+            ON CONFLICT (key) DO NOTHING
+        """)
+        cur.execute("SELECT key, value FROM app_settings")
+        rows = cur.fetchall()
         conn.commit()
     return {row[0]: row[1] for row in rows}
 
@@ -259,21 +255,17 @@ def get_fetch_start_date() -> date:
         log.info(f"Baseline Date changed from {last_run_baseline} to {baseline}. Forcing full fetch from new baseline.")
         return configured_start
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT run_at::date
-                FROM fetch_runs
-                WHERE success = TRUE
-                ORDER BY run_at DESC
-                LIMIT 1
-            """)
-            row = cur.fetchone()
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT run_at::date
+            FROM fetch_runs
+            WHERE success = TRUE
+            ORDER BY run_at DESC
+            LIMIT 1
+        """)
+        row = cur.fetchone()
 
-    if row and row[0]:
-        since = max(configured_start, row[0] - timedelta(days=7))
-    else:
-        since = configured_start
+    since = max(configured_start, row[0] - timedelta(days=7)) if row and row[0] else configured_start
 
     log.info(f"Incremental fetch: fetching from {since} (configured baseline is {configured_start})")
     return since
@@ -281,7 +273,7 @@ def get_fetch_start_date() -> date:
 
 def chunk(lst, size):
     for i in range(0, len(lst), size):
-        yield lst[i:i + size]
+        yield lst[i : i + size]
 
 
 def expand_country_names_for_query(country_names: list[str]) -> list[str]:
@@ -300,77 +292,102 @@ def normalize_country_name(country: str | None) -> str:
 
 
 BORROWER_INSTITUTION_MARKERS = [
-    "ministry", "ministere", "ministère", "department", "agency", "authority",
-    "commission", "bureau", "office", "secretariat", "directorate", "directorat",
-    "municipality", "corporation", "board", "unit", "institute",
-    "company", "council", "government", "republic", "city", "province", "state",
-    "ministério", "ministerio", "agence", "direction", "organisation", "organization",
+    "ministry",
+    "ministere",
+    "ministère",
+    "department",
+    "agency",
+    "authority",
+    "commission",
+    "bureau",
+    "office",
+    "secretariat",
+    "directorate",
+    "directorat",
+    "municipality",
+    "corporation",
+    "board",
+    "unit",
+    "institute",
+    "company",
+    "council",
+    "government",
+    "republic",
+    "city",
+    "province",
+    "state",
+    "ministério",
+    "ministerio",
+    "agence",
+    "direction",
+    "organisation",
+    "organization",
 ]
 
 BORROWER_LABEL_PATTERNS = [
-    r'Borrower',
-    r'Client',
-    r'Implemented by',
-    r'Host Institution',
-    r'Executing Agency',
-    r'Implementing Agency',
-    r'Procuring Entity',
-    r'Contracting Authority',
-    r'Employer',
-    r'Purchaser',
-    r'Agency',
-    r'Organization/Department',
-    r'Organization',
-    r'Department',
-    r'Buyer',
-    r'Acheteur',
-    r'Ma[iî]tre d[’\' ]Ouvrage',
-    r'Autorit[eé] contractante',
-    r'Entit[eé] adjudicante',
-    r'[ÓO]rg[aã]o executor',
+    r"Borrower",
+    r"Client",
+    r"Implemented by",
+    r"Host Institution",
+    r"Executing Agency",
+    r"Implementing Agency",
+    r"Procuring Entity",
+    r"Contracting Authority",
+    r"Employer",
+    r"Purchaser",
+    r"Agency",
+    r"Organization/Department",
+    r"Organization",
+    r"Department",
+    r"Buyer",
+    r"Acheteur",
+    r"Ma[iî]tre d[’\' ]Ouvrage",
+    r"Autorit[eé] contractante",
+    r"Entit[eé] adjudicante",
+    r"[ÓO]rg[aã]o executor",
 ]
 
 BORROWER_BLOCKED_PHRASES = [
-    'world bank',
-    'ida credit',
-    'ida grant',
-    'loan no',
-    'credit no',
-    'project id',
-    'notice no',
-    'published',
-    'request for bids',
-    'request for quotations',
-    'expression of interest',
-    'appel d’offres',
-    'appel d\'offres',
+    "world bank",
+    "ida credit",
+    "ida grant",
+    "loan no",
+    "credit no",
+    "project id",
+    "notice no",
+    "published",
+    "request for bids",
+    "request for quotations",
+    "expression of interest",
+    "appel d’offres",
+    "appel d'offres",
 ]
 
 BORROWER_BLOCKED_PREFIXES = [
-    'project:',
-    'projet :',
-    'projet:',
-    'marché :',
-    'marche :',
-    'marché:',
-    'marche:',
-    'market:',
-    'pays :',
-    'pays:',
-    'country:',
+    "project:",
+    "projet :",
+    "projet:",
+    "marché :",
+    "marche :",
+    "marché:",
+    "marche:",
+    "market:",
+    "pays :",
+    "pays:",
+    "country:",
 ]
 
 BORROWER_SUSPICIOUS_PATTERNS = [
-    r'^\d+[\.\)]\s',
-    r'\bbid document can be obtained\b',
-    r'\bbids? (?:must|shall|will)\b',
-    r'\binterested bidders\b',
-    r'\blate bids?\b',
-    r'\bsubmitted\b',
-    r'\bopened on\b',
-    r'\bclosed in the presence\b',
-    r'\bdelivery period\b',
-    r'\bpayment of\b',
+    r"^\d+[\.\)]\s",
+    r"\bbid document can be obtained\b",
+    r"\bbids? (?:must|shall|will)\b",
+    r"\binterested bidders\b",
+    r"\blate bids?\b",
+    r"\bsubmitted\b",
+    r"\bopened on\b",
+    r"\bclosed in the presence\b",
+    r"\bdelivery period\b",
+    r"\bpayment of\b",
 ]
 
 
@@ -383,7 +400,7 @@ def is_suspicious_borrower_value(value: str | None) -> bool:
     lowered = value.lower().strip()
     if len(lowered) > 140:
         return True
-    if lowered.count(',') >= 4:
+    if lowered.count(",") >= 4:
         return True
     return any(re.search(pattern, lowered, re.IGNORECASE) for pattern in BORROWER_SUSPICIOUS_PATTERNS)
 
@@ -391,9 +408,9 @@ def is_suspicious_borrower_value(value: str | None) -> bool:
 def clean_borrower_candidate(value: str) -> str | None:
     import re
 
-    candidate = re.sub(r'\s+', ' ', (value or '')).strip(" :;,-")
-    candidate = re.sub(r'^(the)\s+', '', candidate, flags=re.IGNORECASE)
-    candidate = re.sub(r'^(buyer|acheteur|borrower|client)\s*[:\-]\s*', '', candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"\s+", " ", (value or "")).strip(" :;,-")
+    candidate = re.sub(r"^(the)\s+", "", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"^(buyer|acheteur|borrower|client)\s*[:\-]\s*", "", candidate, flags=re.IGNORECASE)
     candidate = candidate[:200]
 
     if not candidate or len(candidate) <= 3:
@@ -415,31 +432,33 @@ def borrower_candidate_score(value: str | None, project_name: str = "", source: 
     lowered = value.lower()
     project_lower = (project_name or "").strip().lower()
 
-    if lowered in {'borrower', 'client', 'project', 'program', 'programme', 'initiative'}:
+    if lowered in {"borrower", "client", "project", "program", "programme", "initiative"}:
         return -1
     if any(token in lowered for token in BORROWER_BLOCKED_PHRASES):
         return -1
     if project_lower and lowered == project_lower:
         return -1
-    if '@' in lowered or 'http://' in lowered or 'https://' in lowered:
+    if "@" in lowered or "http://" in lowered or "https://" in lowered:
         return -1
 
     score = {
-        'contact_org': 120,
-        'raw_borrower': 90,
-        'raw_procuring': 85,
-        'description_label': 80,
-        'description_line': 65,
-        'raw_contactish': 40,
+        "contact_org": 120,
+        "raw_borrower": 90,
+        "raw_procuring": 85,
+        "description_label": 80,
+        "description_line": 65,
+        "raw_contactish": 40,
     }.get(source, 0)
 
     if any(marker in lowered for marker in BORROWER_INSTITUTION_MARKERS):
         score += 25
-    if '(' in value and ')' in value:
+    if "(" in value and ")" in value:
         score += 10
     if len(value.split()) >= 3:
         score += 10
-    if re.search(r'\b(minist[eè]re|ministry|department|agency|authority|buyer|acheteur|ma[iî]tre)\b', lowered, re.IGNORECASE):
+    if re.search(
+        r"\b(minist[eè]re|ministry|department|agency|authority|buyer|acheteur|ma[iî]tre)\b", lowered, re.IGNORECASE
+    ):
         score += 15
 
     return score
@@ -458,14 +477,14 @@ def extract_borrower_candidates_from_description(text: str) -> list[tuple[str, s
     label_regex = "|".join(BORROWER_LABEL_PATTERNS)
 
     for idx, line in enumerate(lines):
-        same_line_match = re.match(rf'^\s*(?:{label_regex})\s*[:\-]\s*(.+)$', line, re.IGNORECASE)
+        same_line_match = re.match(rf"^\s*(?:{label_regex})\s*[:\-]\s*(.+)$", line, re.IGNORECASE)
         if same_line_match:
             candidate = clean_borrower_candidate(same_line_match.group(1))
             if candidate:
                 candidates.append(("description_label", candidate))
                 continue
 
-        label_only_match = re.match(rf'^\s*(?:{label_regex})\s*[:\-]?\s*$', line, re.IGNORECASE)
+        label_only_match = re.match(rf"^\s*(?:{label_regex})\s*[:\-]?\s*$", line, re.IGNORECASE)
         if label_only_match and idx + 1 < len(lines):
             candidate = clean_borrower_candidate(lines[idx + 1])
             if candidate:
@@ -495,6 +514,7 @@ def extract_borrower_candidates_from_description(text: str) -> list[tuple[str, s
 
 
 # ── Borrower extraction helper ──────────────────────────────────────────────────
+
 
 def extract_borrower_from_description(text: str) -> str | None:
     """Extract borrower/host institution from description text."""
@@ -562,16 +582,31 @@ def choose_borrower(raw: dict, description: str, contact: dict, project_name: st
 
 # ── HTML helper ───────────────────────────────────────────────────────────────
 
+
 def strip_html(html: str) -> str | None:
     """Strip HTML tags, preserve structure as plain text."""
     if not html:
         return None
     soup = BeautifulSoup(html, "html.parser")
-    for tag in soup.find_all(['br', 'p', 'div', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5']):
-        tag.insert_after('\n')
-    text = soup.get_text(separator='\n', strip=True)
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    return '\n'.join(lines) or None
+    for tag in soup.find_all(["br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5"]):
+        tag.insert_after("\n")
+    text = soup.get_text(separator="\n", strip=True)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n".join(lines) or None
+
+
+REFERENCE_IN_TEXT_RE = re.compile(
+    r"\b(?:borrower|buyer|bid|tender|procurement|contract|package|lot)\s*"
+    r"(?:reference|ref(?:erence)?|number|no\.?)(?:\s*(?:number|no\.?))?\s*[:#\-]?\s*"
+    r"([A-Za-z0-9][A-Za-z0-9./_-]{2,100})",
+    re.IGNORECASE,
+)
+
+
+def extract_procurement_reference_from_text(text: str | None) -> str:
+    """Read a labelled tender/lot reference when the API omitted its field."""
+    match = REFERENCE_IN_TEXT_RE.search(text or "")
+    return match.group(1).rstrip(".,;:)") if match else ""
 
 
 def build_procurement_detail_url(notice_id: str, fallback_url: str = "") -> str:
@@ -624,7 +659,7 @@ def extract_contact_org_from_lines(lines: list[str]) -> str | None:
         if lowered in stop_markers:
             break
         if lowered in label_variants:
-            for candidate in section[idx + 1:]:
+            for candidate in section[idx + 1 :]:
                 candidate = candidate.strip()
                 if not candidate:
                     continue
@@ -638,9 +673,7 @@ def fetch_contact_org_from_detail_page(notice_id: str, fallback_url: str = "") -
     api_record = fetch_notice_record_by_id(notice_id)
     if api_record:
         api_contact_org = clean_borrower_candidate(
-            api_record.get("contact_organization") or
-            api_record.get("agency_name") or
-            api_record.get("agencyname")
+            api_record.get("contact_organization") or api_record.get("agency_name") or api_record.get("agencyname")
         )
         if api_contact_org:
             log.info(f"  Full notice API contact org for {notice_id}: {api_contact_org}")
@@ -667,6 +700,7 @@ def fetch_contact_org_from_detail_page(notice_id: str, fallback_url: str = "") -
 
 # ── Date / amount parsers ─────────────────────────────────────────────────────
 
+
 def parse_date(val) -> date | None:
     """
     FIX: use s[:19] instead of s[:20] to avoid capturing timezone
@@ -676,8 +710,7 @@ def parse_date(val) -> date | None:
     if not val:
         return None
     s = str(val).strip()[:19]
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y", "%d-%B-%Y"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%b-%Y", "%m/%d/%Y", "%d-%B-%Y"):
         try:
             return datetime.strptime(s, fmt).date()
         except (ValueError, TypeError):
@@ -697,8 +730,7 @@ def parse_deadline(val) -> tuple:
     if not val:
         return None, None
     s = str(val).strip()[:19]
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d", "%m/%d/%Y", "%d-%b-%Y"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y", "%d-%b-%Y"):
         try:
             dt = datetime.strptime(s, fmt)
             return dt, dt.date()
@@ -716,19 +748,20 @@ def parse_amount(val) -> float | None:
 
 # ── API fetching ──────────────────────────────────────────────────────────────
 
+
 def fetch_page(country_names: list[str], since: date, start: int = 0, rows: int = ROWS_PER_PAGE) -> dict:
     """Fetch one page from the WB procnotices endpoint."""
     query_countries = expand_country_names_for_query(country_names)
     params = {
-        "format":                  "json",
-        "fl":                      "*",
-        "rows":                    rows,
-        "os":                      start,
-        "apilang":                 "en",
-        "strdate":                 since.strftime("%Y-%m-%d"),
+        "format": "json",
+        "fl": "*",
+        "rows": rows,
+        "os": start,
+        "apilang": "en",
+        "strdate": since.strftime("%Y-%m-%d"),
         "project_ctry_name_exact": "^".join(query_countries),
-        "srt":                     "noticedate",
-        "order":                   "desc",
+        "srt": "noticedate",
+        "order": "desc",
     }
     resp = requests.get(API_BASE, params=params, timeout=20)
     log.info(f"  GET {resp.url[:120]}...")
@@ -753,15 +786,19 @@ def fetch_page_with_fallback(country_names: list[str], since: date, start: int =
 
 # ── Data transformation ───────────────────────────────────────────────────────
 
+
 def transform(raw: dict, is_existing: bool = False) -> dict | None:
     """
     Map a raw API record to our DB schema.
     Returns None if the record has no usable ID.
     """
     notice_id = str(
-        raw.get("id") or raw.get("nid") or
-        raw.get("notice_no") or raw.get("procurement_number") or
-        raw.get("ref_no") or ""
+        raw.get("id")
+        or raw.get("nid")
+        or raw.get("notice_no")
+        or raw.get("procurement_number")
+        or raw.get("ref_no")
+        or ""
     ).strip()
     if not notice_id:
         return None
@@ -772,6 +809,9 @@ def transform(raw: dict, is_existing: bool = False) -> dict | None:
         notice_type = "IFB"
     elif "Expression of Interest" in raw_type or raw_type == "REOI":
         notice_type = "REOI"
+    elif "Contract Award" in raw_type or raw_type == "Award":
+        # Includes the World Bank's "Small Assignment Contract Award" variant.
+        notice_type = "Contract Award"
     else:
         notice_type = raw_type
 
@@ -781,26 +821,24 @@ def transform(raw: dict, is_existing: bool = False) -> dict | None:
     # The old keys (submission_date, bids_deadline, deadline_date) do not exist
     # in the procnotices endpoint and caused deadline_raw to always be empty.
     deadline_raw = (
-        raw.get("ndate") or                       # PRIMARY — procnotices API
-        raw.get("SubmissionDeadlineDate") or       # capitalised variant
-        raw.get("submission_deadline_date") or     # fallback
-        raw.get("bids_deadline") or ""
+        raw.get("ndate")  # PRIMARY — procnotices API
+        or raw.get("SubmissionDeadlineDate")  # capitalised variant
+        or raw.get("submission_deadline_date")  # fallback
+        or raw.get("bids_deadline")
+        or ""
     )
     deadline_dt, deadline_date = parse_deadline(deadline_raw)
 
     # Notice date
     notice_date = (
-        parse_date(raw.get("noticedate")) or
-        parse_date(raw.get("notice_date")) or
-        parse_date(raw.get("pdate")) or
-        parse_date(raw.get("published_date"))
+        parse_date(raw.get("noticedate"))
+        or parse_date(raw.get("notice_date"))
+        or parse_date(raw.get("pdate"))
+        or parse_date(raw.get("published_date"))
     )
 
     # Title
-    title = (
-        raw.get("notice_title") or raw.get("title") or
-        raw.get("bid_description") or raw.get("project_name") or ""
-    )
+    title = raw.get("notice_title") or raw.get("title") or raw.get("bid_description") or raw.get("project_name") or ""
 
     # Description — strip HTML tags
     raw_desc = raw.get("notice_text") or raw.get("description") or raw.get("bid_description") or ""
@@ -808,12 +846,19 @@ def transform(raw: dict, is_existing: bool = False) -> dict | None:
 
     contact = dict(raw.get("contact") or {})
     contact_org = (
-        raw.get("contact_org") or raw.get("contact_organization") or
-        raw.get("agency_name") or raw.get("organization_department") or
-        raw.get("organization/department") or raw.get("agencyname") or
-        raw.get("organization") or contact.get("organization_department") or
-        contact.get("organization/department") or contact.get("organization") or
-        contact.get("org") or contact.get("department") or ""
+        raw.get("contact_org")
+        or raw.get("contact_organization")
+        or raw.get("agency_name")
+        or raw.get("organization_department")
+        or raw.get("organization/department")
+        or raw.get("agencyname")
+        or raw.get("organization")
+        or contact.get("organization_department")
+        or contact.get("organization/department")
+        or contact.get("organization")
+        or contact.get("org")
+        or contact.get("department")
+        or ""
     )
 
     if not contact_org and not is_existing:
@@ -828,40 +873,55 @@ def transform(raw: dict, is_existing: bool = False) -> dict | None:
         contact,
         project_name=raw.get("project_name") or "",
     )
+    borrower_bid_reference = (
+        raw.get("borrower_bid_reference")
+        or raw.get("bid_reference_no")
+        or raw.get("bid_reference")
+        or raw.get("procurement_number")
+        or raw.get("ref_no")
+        or extract_procurement_reference_from_text(description)
+        or extract_procurement_reference_from_text(title)
+        or ""
+    )
 
     return {
-        "id":                     notice_id,
-        "project_id":             raw.get("project_id") or "",
-        "project_name":           raw.get("project_name") or "",
-        "country":                normalize_country_name(raw.get("project_ctry_name") or raw.get("country") or ""),
-        "notice_no":              raw.get("notice_no") or raw.get("ref_no") or notice_id,
-        "notice_type":            notice_type,
-        "notice_status":          raw.get("notice_status") or raw.get("procurement_status") or "Published",
-        "procurement_method":     raw.get("procurement_method") or raw.get("procurement_method_name") or "",
-        "language":               raw.get("language") or raw.get("notice_language") or raw.get("notice_lang_name") or "English",
-        "title":                  title,
-        "description":            (description or "")[:5000],
-        "borrower_bid_reference": (raw.get("borrower_bid_reference") or
-                                   raw.get("bid_reference") or raw.get("ref_no") or ""),
-        "notice_date":            notice_date,
-        "submission_deadline":    deadline_dt,
-        "submission_date":        deadline_date,
-        "contract_amount":        parse_amount(raw.get("contract_amount") or raw.get("total_contract_amount")),
-        "currency":               raw.get("currency") or "",
-        "borrower":               borrower,
-        "contact_name":           raw.get("contact_name") or contact.get("name") or "",
-        "contact_org":            contact_org,
-        "contact_address":        raw.get("contact_address") or contact.get("address") or "",
-        "contact_city":           raw.get("contact_city") or contact.get("city") or "",
-        "contact_phone":          (raw.get("contact_phone") or raw.get("phone") or
-                                   raw.get("contactphone") or raw.get("telephone") or
-                                   raw.get("contact_phone_no") or
-                                   contact.get("phone") or ""),
-        "contact_email":          (raw.get("contact_email") or raw.get("email") or
-                                   raw.get("contactemail") or contact.get("email") or ""),
-        "contact_website":        raw.get("contact_website") or raw.get("website") or contact.get("website") or "",
-        "url":                    raw.get("url") or "https://projects.worldbank.org/en/projects-operations/procurement",
-        "status":                 raw.get("notice_status") or raw.get("procurement_status") or "Published",
+        "id": notice_id,
+        "project_id": raw.get("project_id") or "",
+        "project_name": raw.get("project_name") or "",
+        "country": normalize_country_name(raw.get("project_ctry_name") or raw.get("country") or ""),
+        "notice_no": raw.get("notice_no") or raw.get("ref_no") or notice_id,
+        "notice_type": notice_type,
+        "notice_status": raw.get("notice_status") or raw.get("procurement_status") or "Published",
+        "procurement_method": raw.get("procurement_method") or raw.get("procurement_method_name") or "",
+        "language": raw.get("language") or raw.get("notice_language") or raw.get("notice_lang_name") or "English",
+        "title": title,
+        "description": (description or "")[:5000],
+        "borrower_bid_reference": borrower_bid_reference,
+        "notice_date": notice_date,
+        "submission_deadline": deadline_dt,
+        "submission_date": deadline_date,
+        "contract_amount": parse_amount(raw.get("contract_amount") or raw.get("total_contract_amount")),
+        "currency": raw.get("currency") or "",
+        "borrower": borrower,
+        "contact_name": raw.get("contact_name") or contact.get("name") or "",
+        "contact_org": contact_org,
+        "contact_address": raw.get("contact_address") or contact.get("address") or "",
+        "contact_city": raw.get("contact_city") or contact.get("city") or "",
+        "contact_phone": (
+            raw.get("contact_phone")
+            or raw.get("phone")
+            or raw.get("contactphone")
+            or raw.get("telephone")
+            or raw.get("contact_phone_no")
+            or contact.get("phone")
+            or ""
+        ),
+        "contact_email": (
+            raw.get("contact_email") or raw.get("email") or raw.get("contactemail") or contact.get("email") or ""
+        ),
+        "contact_website": raw.get("contact_website") or raw.get("website") or contact.get("website") or "",
+        "url": raw.get("url") or "https://projects.worldbank.org/en/projects-operations/procurement",
+        "status": raw.get("notice_status") or raw.get("procurement_status") or "Published",
     }
 
 
@@ -876,9 +936,18 @@ INSERT INTO procurement_notices
      contact_phone, contact_email, contact_website, url, status, updated_at)
 VALUES %s
 ON CONFLICT (id) DO UPDATE SET
+    project_id           = COALESCE(NULLIF(EXCLUDED.project_id, ''), procurement_notices.project_id),
+    project_name         = COALESCE(NULLIF(EXCLUDED.project_name, ''), procurement_notices.project_name),
+    country              = COALESCE(NULLIF(EXCLUDED.country, ''), procurement_notices.country),
+    notice_no            = COALESCE(NULLIF(EXCLUDED.notice_no, ''), procurement_notices.notice_no),
+    notice_type          = COALESCE(NULLIF(EXCLUDED.notice_type, ''), procurement_notices.notice_type),
     notice_status        = EXCLUDED.notice_status,
     title                = EXCLUDED.title,
     description          = EXCLUDED.description,
+    borrower_bid_reference = COALESCE(NULLIF(EXCLUDED.borrower_bid_reference, ''), procurement_notices.borrower_bid_reference),
+    notice_date          = COALESCE(EXCLUDED.notice_date, procurement_notices.notice_date),
+    contract_amount      = COALESCE(EXCLUDED.contract_amount, procurement_notices.contract_amount),
+    currency             = COALESCE(NULLIF(EXCLUDED.currency, ''), procurement_notices.currency),
     borrower             = EXCLUDED.borrower,
     contact_org          = EXCLUDED.contact_org,
     submission_deadline  = EXCLUDED.submission_deadline,
@@ -886,7 +955,14 @@ ON CONFLICT (id) DO UPDATE SET
     status               = EXCLUDED.status,
     updated_at           = NOW()
 WHERE
-    procurement_notices.title IS DISTINCT FROM EXCLUDED.title
+    procurement_notices.project_id IS DISTINCT FROM COALESCE(NULLIF(EXCLUDED.project_id, ''), procurement_notices.project_id)
+    OR procurement_notices.project_name IS DISTINCT FROM COALESCE(NULLIF(EXCLUDED.project_name, ''), procurement_notices.project_name)
+    OR procurement_notices.notice_no IS DISTINCT FROM COALESCE(NULLIF(EXCLUDED.notice_no, ''), procurement_notices.notice_no)
+    OR procurement_notices.notice_type IS DISTINCT FROM COALESCE(NULLIF(EXCLUDED.notice_type, ''), procurement_notices.notice_type)
+    OR procurement_notices.borrower_bid_reference IS DISTINCT FROM COALESCE(NULLIF(EXCLUDED.borrower_bid_reference, ''), procurement_notices.borrower_bid_reference)
+    OR procurement_notices.contract_amount IS DISTINCT FROM COALESCE(EXCLUDED.contract_amount, procurement_notices.contract_amount)
+    OR procurement_notices.currency IS DISTINCT FROM COALESCE(NULLIF(EXCLUDED.currency, ''), procurement_notices.currency)
+    OR procurement_notices.title IS DISTINCT FROM EXCLUDED.title
     OR procurement_notices.borrower IS DISTINCT FROM EXCLUDED.borrower
     OR procurement_notices.contact_org IS DISTINCT FROM EXCLUDED.contact_org
     OR procurement_notices.submission_date IS DISTINCT FROM EXCLUDED.submission_date
@@ -1005,9 +1081,21 @@ def mark_country_fetch_finished(
                 updated_at = NOW()
             """,
             (
-                country, status, success, since, page_size, fetched, new_records,
-                total_available, summary["row_count"], summary["first_notice_date"],
-                summary["last_notice_date"], error_msg, api_url, retry_count, success,
+                country,
+                status,
+                success,
+                since,
+                page_size,
+                fetched,
+                new_records,
+                total_available,
+                summary["row_count"],
+                summary["first_notice_date"],
+                summary["last_notice_date"],
+                error_msg,
+                api_url,
+                retry_count,
+                success,
             ),
         )
     conn.commit()
@@ -1071,8 +1159,7 @@ def backfill_host_institutions(conn) -> int:
     return updated
 
 
-def log_run(conn, countries: str, fetched: int, new_records: int,
-            success: bool, error_msg: str | None = None):
+def log_run(conn, countries: str, fetched: int, new_records: int, success: bool, error_msg: str | None = None):
     with conn.cursor() as cur:
         cur.execute(
             """INSERT INTO fetch_runs
@@ -1085,13 +1172,14 @@ def log_run(conn, countries: str, fetched: int, new_records: int,
 
 # ── Fetch one batch of countries ──────────────────────────────────────────────
 
+
 def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
     """Paginate through all pages for a batch of countries."""
     total_upserted = 0
-    total_new      = 0
-    start          = 0
-    page_size      = ROWS_PER_PAGE
-    retry_count    = 0
+    total_new = 0
+    start = 0
+    page_size = ROWS_PER_PAGE
+    retry_count = 0
     total_available = 0
     per_country_fetched = {country: 0 for country in batch}
     per_country_new = {country: 0 for country in batch}
@@ -1134,9 +1222,12 @@ def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
         item_ids = []
         for item in raw_items:
             nid = str(
-                item.get("id") or item.get("nid") or
-                item.get("notice_no") or item.get("procurement_number") or
-                item.get("ref_no") or ""
+                item.get("id")
+                or item.get("nid")
+                or item.get("notice_no")
+                or item.get("procurement_number")
+                or item.get("ref_no")
+                or ""
             ).strip()
             if nid:
                 item_ids.append(nid)
@@ -1151,16 +1242,19 @@ def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
         all_too_old = True
         for item in raw_items:
             notice_date = (
-                parse_date(item.get("noticedate")) or
-                parse_date(item.get("pdate")) or
-                parse_date(item.get("published_date"))
+                parse_date(item.get("noticedate"))
+                or parse_date(item.get("pdate"))
+                or parse_date(item.get("published_date"))
             )
             if notice_date and notice_date >= since:
                 all_too_old = False
                 nid = str(
-                    item.get("id") or item.get("nid") or
-                    item.get("notice_no") or item.get("procurement_number") or
-                    item.get("ref_no") or ""
+                    item.get("id")
+                    or item.get("nid")
+                    or item.get("notice_no")
+                    or item.get("procurement_number")
+                    or item.get("ref_no")
+                    or ""
                 ).strip()
                 is_existing = nid in existing_ids
                 transformed = transform(item, is_existing=is_existing)
@@ -1183,7 +1277,7 @@ def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
 
             upserted, new_count = upsert_notices(conn, notices)
             total_upserted += upserted
-            total_new      += new_count
+            total_new += new_count
             for notice_country, ids in ids_by_country.items():
                 if notice_country in per_country_fetched:
                     per_country_fetched[notice_country] += len(ids)
@@ -1251,6 +1345,7 @@ def fetch_batch_resilient(conn, batch: list[str], since: date) -> tuple[int, int
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def run():
     global COUNTRY_BATCH, REQUEST_DELAY
     log.info("═" * 60)
@@ -1262,18 +1357,18 @@ def run():
     COUNTRY_BATCH = int(float(settings.get("country_batch", COUNTRY_BATCH)))
     REQUEST_DELAY = float(settings.get("request_delay", REQUEST_DELAY))
 
-    since            = get_fetch_start_date()
+    since = get_fetch_start_date()
     target_countries = get_target_countries()
-    batches          = list(chunk(target_countries, COUNTRY_BATCH))
+    batches = list(chunk(target_countries, COUNTRY_BATCH))
 
     log.info(f"Fetching {len(target_countries)} countries in {len(batches)} batch(es)")
     log.info(f"Date window: {since} → today\n")
 
-    conn           = get_connection()
+    conn = get_connection()
     total_upserted = 0
-    total_new      = 0
-    error_msg      = None
-    success        = False
+    total_new = 0
+    error_msg = None
+    success = False
 
     try:
         repaired = backfill_host_institutions(conn)
@@ -1284,7 +1379,7 @@ def run():
             log.info(f"\n── Batch {i}/{len(batches)} ──")
             upserted, new = fetch_batch_resilient(conn, batch, since)
             total_upserted += upserted
-            total_new      += new
+            total_new += new
             time.sleep(REQUEST_DELAY)
 
         success = True

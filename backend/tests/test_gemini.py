@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
-from fastapi import HTTPException
+
 from api import enrich_bidder_gemini
+from fastapi import HTTPException
 from services.gemini_service import classify_and_enrich_with_gemini
 
 
