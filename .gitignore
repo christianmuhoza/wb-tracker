@@ -17,6 +17,7 @@ frontend/dist/
 
 # Logs
 *.log
+*.log.*
 *.err.log
 *.out.log
 
