@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { apiUrl, getToken } from '../api.js'
 
 export function useApi(url, deps = []) {
   const [data,    setData]    = useState(null)
@@ -16,8 +17,18 @@ export function useApi(url, deps = []) {
 
     setLoading(true)
     setError(null)
-    fetch(url, { signal: controller.signal })
-      .then(r => { if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`); return r.json() })
+    fetch(apiUrl(url), {
+      signal: controller.signal,
+      headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+    })
+      .then(r => {
+        if (r.status === 401) {
+          window.location.href = '/login'
+          throw new Error('Unauthorized')
+        }
+        if (!r.ok) throw new Error(`${r.status}: ${r.statusText}`)
+        return r.json()
+      })
       .then(d  => {
         if (!active) return
         setData(d)
@@ -33,7 +44,7 @@ export function useApi(url, deps = []) {
       active = false
       controller.abort()
     }
-  }, [url, ...deps])
+  }, [url].concat(deps))
 
   return { data, loading, error }
 }
