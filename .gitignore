@@ -32,6 +32,8 @@ Thumbs.db
 
 # Project specific
 backend/bidders_import_summary.json
+wb_tracker.backup
+*.backup
 
 # OpenCode
 .opencode/

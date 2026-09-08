@@ -1,0 +1,31 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+exclude = [
+  "node_modules",
+  "dist",
+  "venv",
+  ".venv",
+  "__pycache__",
+  ".opencode",
+]
+
+# Retired / non-entry-point legacy modules are excluded from lint so CI stays
+# green without churning working code that is no longer part of the API.
+extend-exclude = [
+  "backend/api.py",                      # original 4076-line monolith (kept for reference)
+  "backend/import_contact_org_bidders.py",
+  "backend/import_bidders_batch.py",
+  "backend/fetcher_once.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+# E501: the codebase intentionally uses long SQL/URL/description lines.
+# B008: `Depends(...)` in argument defaults is the idiomatic (and required)
+#       FastAPI pattern for dependency injection; silence the false positive.
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
