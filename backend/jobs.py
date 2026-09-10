@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from db import db, ensure_support_tables, q
 
@@ -19,6 +19,9 @@ log = logging.getLogger(__name__)
 
 JOB_TYPES = ("full_fetch", "country_backfill", "sync_award_alerts", "import_bidders")
 JOB_STATES = ("queued", "running", "completed", "failed", "cancelled")
+DEFAULT_MAX_ATTEMPTS = 3
+STALE_JOB_TIMEOUT = timedelta(hours=6)
+MAX_RETRY_DELAY = timedelta(hours=1)
 
 
 def ensure_jobs_table():
@@ -31,8 +34,12 @@ def enqueue_job(job_type: str, payload: dict | None = None) -> int:
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO fetch_jobs (job_type, payload) VALUES (%s, %s) RETURNING id",
-                (job_type, __import__("json").dumps(payload or {})),
+                """
+                INSERT INTO fetch_jobs (job_type, payload, max_attempts)
+                VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (job_type, __import__("json").dumps(payload or {}), DEFAULT_MAX_ATTEMPTS),
             )
             row = cur.fetchone()
             job_id = row["id"]
@@ -71,6 +78,9 @@ def _set_status(job_id: int, status: str, **fields):
         elif key in ("progress", "error"):
             sets.append(f"{key} = %s")
             params.append(val)
+        elif key == "locked_at":
+            sets.append("locked_at = %s")
+            params.append(val)
     params.append(job_id)
     with db() as conn:
         with conn.cursor() as cur:
@@ -78,14 +88,55 @@ def _set_status(job_id: int, status: str, **fields):
         conn.commit()
 
 
+def retry_delay(attempt_count: int) -> timedelta:
+    """Return a bounded delay before the next attempt."""
+    delay = timedelta(minutes=2 ** max(0, attempt_count - 1))
+    return min(delay, MAX_RETRY_DELAY)
+
+
+def recover_stale_jobs(now: datetime | None = None) -> int:
+    """Requeue or fail jobs whose worker lease expired."""
+    now = now or datetime.now().astimezone()
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fetch_jobs
+                SET status = CASE WHEN attempt_count < max_attempts THEN 'queued' ELSE 'failed' END,
+                    next_attempt_at = CASE
+                        WHEN attempt_count < max_attempts
+                        THEN NOW() + LEAST(3600, 60 * POWER(2, GREATEST(attempt_count - 1, 0))) * INTERVAL '1 second'
+                        ELSE NULL
+                    END,
+                    finished_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE NOW() END,
+                    locked_at = NULL,
+                    error = CASE
+                        WHEN attempt_count < max_attempts THEN 'Worker lease expired; job scheduled for retry.'
+                        ELSE 'Worker lease expired after maximum attempts.'
+                    END,
+                    updated_at = NOW()
+                WHERE status = 'running'
+                  AND COALESCE(locked_at, updated_at) < %s
+                """,
+                [now - STALE_JOB_TIMEOUT],
+            )
+            recovered = cur.rowcount
+        conn.commit()
+    if recovered:
+        log.warning("Recovered %s stale job(s)", recovered)
+    return recovered
+
+
 def claim_next_job() -> dict | None:
     """Atomically claim one queued job so concurrent workers cannot duplicate it."""
+    recover_stale_jobs()
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 WITH next_job AS (
                     SELECT id FROM fetch_jobs
                     WHERE status = 'queued'
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
                     ORDER BY created_at ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
@@ -93,11 +144,14 @@ def claim_next_job() -> dict | None:
                 UPDATE fetch_jobs AS job
                 SET status = 'running',
                     started_at = COALESCE(job.started_at, NOW()),
+                locked_at = NOW(),
+                attempt_count = job.attempt_count + 1,
+                next_attempt_at = NULL,
                     progress = 'Starting',
                     updated_at = NOW()
                 FROM next_job
                 WHERE job.id = next_job.id
-                RETURNING job.id, job.job_type, job.payload
+                RETURNING job.id, job.job_type, job.payload, job.attempt_count, job.max_attempts
             """)
             row = cur.fetchone()
         conn.commit()
@@ -110,12 +164,12 @@ def _run_job(job_id: int, job_type: str, payload: dict):
             from routers.fetch_utils import run_full_fetch
 
             result = run_full_fetch(payload)
-            _set_status(job_id, "completed", finished_at=True, progress=result.get("stdout", "Done"))
+            _set_status(job_id, "completed", finished_at=True, locked_at=None, progress=result.get("stdout", "Done"))
         elif job_type == "country_backfill":
             from routers.fetch_utils import run_country_backfill
 
             result = run_country_backfill(payload)
-            _set_status(job_id, "completed", finished_at=True, progress=result.get("stdout", "Done"))
+            _set_status(job_id, "completed", finished_at=True, locked_at=None, progress=result.get("stdout", "Done"))
         elif job_type == "sync_award_alerts":
             from routers.awards import sync_award_alerts
 
@@ -124,6 +178,7 @@ def _run_job(job_id: int, job_type: str, payload: dict):
                 job_id,
                 "completed",
                 finished_at=True,
+                locked_at=None,
                 progress=f"Created {result.get('created', 0)}, updated {result.get('updated', 0)}",
             )
         elif job_type == "import_bidders":
@@ -135,13 +190,46 @@ def _run_job(job_id: int, job_type: str, payload: dict):
             else:
                 result = import_missing_awards(fetch_detail=payload.get("fetch_detail", False))
             _set_status(
-                job_id, "completed", finished_at=True, progress=f"Processed {result.get('processed', 0)} notices"
+                job_id,
+                "completed",
+                finished_at=True,
+                locked_at=None,
+                progress=f"Processed {result.get('processed', 0)} notices",
             )
         else:
             raise ValueError(f"Unknown job type: {job_type}")
     except Exception:
         log.exception("Job #%s (%s) failed", job_id, job_type)
-        _set_status(job_id, "failed", finished_at=True, error=traceback.format_exc()[:2000])
+        error = traceback.format_exc()[:2000]
+        with db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE fetch_jobs
+                    SET status = CASE WHEN attempt_count < max_attempts THEN 'queued' ELSE 'failed' END,
+                        next_attempt_at = CASE
+                            WHEN attempt_count < max_attempts
+                            THEN NOW() + LEAST(3600, 60 * POWER(2, GREATEST(attempt_count - 1, 0))) * INTERVAL '1 second'
+                            ELSE NULL
+                        END,
+                        finished_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE NOW() END,
+                        locked_at = NULL,
+                        error = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING status, attempt_count, max_attempts
+                    """,
+                    [error, job_id],
+                )
+                failure = cur.fetchone()
+            conn.commit()
+        if failure and failure["status"] == "queued":
+            log.warning(
+                "Job #%s scheduled for retry (%s/%s)",
+                job_id,
+                failure["attempt_count"],
+                failure["max_attempts"],
+            )
     finally:
         log.info("Job #%s (%s) finished", job_id, job_type)
 
