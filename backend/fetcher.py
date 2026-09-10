@@ -27,6 +27,7 @@ import os
 import re
 import time
 import traceback
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
@@ -884,13 +885,47 @@ def upsert_notices(conn, notices: list[dict]) -> tuple[int, int]:
     if not notices:
         return 0, 0
 
+    unique_notices = {}
+    for notice in notices:
+        country = (notice.get("country") or "").strip().lower()
+        notice_no = (notice.get("notice_no") or "").strip().lower()
+        dedupe_key = (country, notice_no) if country and notice_no else ("id", notice["id"])
+        unique_notices[dedupe_key] = notice
+    notices = list(unique_notices.values())
+
+    with conn.cursor() as cur:
+        identity_pairs = [
+            (notice["country"].strip(), notice["notice_no"].strip())
+            for notice in notices
+            if notice.get("country") and notice.get("notice_no")
+        ]
+        existing_by_identity = {}
+        if identity_pairs:
+            cur.execute(
+                """
+                SELECT id, country, notice_no
+                FROM procurement_notices
+                WHERE (LOWER(TRIM(country)), LOWER(TRIM(notice_no))) IN %s
+                """,
+                (tuple(identity_pairs),),
+            )
+            existing_by_identity = {(row[1].strip().lower(), row[2].strip().lower()): row[0] for row in cur.fetchall()}
+    for notice in notices:
+        identity = (
+            (notice.get("country") or "").strip().lower(),
+            (notice.get("notice_no") or "").strip().lower(),
+        )
+        if identity in existing_by_identity:
+            notice["id"] = existing_by_identity[identity]
+
     ids = [n["id"] for n in notices]
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM procurement_notices WHERE id = ANY(%s)", (ids,))
         existing = {row[0] for row in cur.fetchall()}
 
     new_count = sum(1 for n in notices if n["id"] not in existing)
-    execute_values(conn.cursor(), UPSERT_SQL, notices, template=UPSERT_TEMPLATE)
+    with conn.cursor() as cur:
+        execute_values(cur, UPSERT_SQL, notices, template=UPSERT_TEMPLATE)
     conn.commit()
     return len(notices), new_count
 
@@ -1072,7 +1107,13 @@ def log_run(conn, countries: str, fetched: int, new_records: int, success: bool,
 # ── Fetch one batch of countries ──────────────────────────────────────────────
 
 
-def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
+def fetch_batch(
+    conn,
+    batch: list[str],
+    since: date,
+    progress_callback: Callable[..., None] | None = None,
+    countries_total: int | None = None,
+) -> tuple[int, int]:
     """Paginate through all pages for a batch of countries."""
     total_upserted = 0
     total_new = 0
@@ -1084,13 +1125,56 @@ def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
     per_country_new = {country: 0 for country in batch}
 
     log.info(f"  Countries: {', '.join(batch)}")
+    report = progress_callback or (lambda **_: None)
+    report(
+        stage="starting_batch",
+        message=f"Starting batch: {', '.join(batch)}",
+        current_country=", ".join(batch),
+        countries_total=countries_total or len(batch),
+        page_offset=0,
+        records_upserted=0,
+        records_new=0,
+    )
     for country in batch:
         mark_country_fetch_started(conn, country, since)
 
     while True:
         log.info(f"  Page offset={start} ...")
-        data, page_size, page_retries = fetch_page_with_fallback(batch, since, start)
+        report(
+            stage="requesting_page",
+            message=f"Requesting page at offset {start}",
+            current_country=", ".join(batch),
+            countries_total=countries_total or len(batch),
+            page_offset=start,
+            page_size=page_size,
+            records_upserted=total_upserted,
+            records_new=total_new,
+        )
+        try:
+            data, page_size, page_retries = fetch_page_with_fallback(batch, since, start)
+        except Exception as exc:
+            report(
+                stage="network_error",
+                message=f"Page request failed at offset {start}: {exc}",
+                current_country=", ".join(batch),
+                countries_total=countries_total or len(batch),
+                page_offset=start,
+                page_size=page_size,
+                records_upserted=total_upserted,
+                records_new=total_new,
+            )
+            raise
         retry_count += page_retries
+        if page_retries:
+            report(
+                stage="page_retry",
+                message=f"Page request succeeded after {page_retries} fallback retry(s)",
+                current_country=", ".join(batch),
+                countries_total=countries_total or len(batch),
+                page_offset=start,
+                page_size=page_size,
+                retries=retry_count,
+            )
         total_available = int(data.get("total", 0))
 
         raw = data.get("procnotices", [])
@@ -1187,6 +1271,18 @@ def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
                 f"  {upserted} upserted | {new_count} genuinely new "
                 f"(batch total: {total_upserted} / {total_available})"
             )
+            report(
+                stage="page_completed",
+                message=f"Completed page at offset {start}",
+                current_country=", ".join(batch),
+                countries_total=countries_total or len(batch),
+                page_offset=start,
+                page_size=page_size,
+                total_available=total_available,
+                records_upserted=total_upserted,
+                records_new=total_new,
+                retries=retry_count,
+            )
         else:
             log.info("  0 notices passed date filter on this page.")
 
@@ -1207,15 +1303,32 @@ def fetch_batch(conn, batch: list[str], since: date) -> tuple[int, int]:
             page_size=page_size,
             retry_count=retry_count,
         )
+    report(
+        stage="batch_completed",
+        message=f"Completed batch: {', '.join(batch)}",
+        current_country=", ".join(batch),
+        countries_total=countries_total or len(batch),
+        countries_completed=len(batch),
+        total_available=total_available,
+        records_upserted=total_upserted,
+        records_new=total_new,
+    )
 
     return total_upserted, total_new
 
 
-def fetch_batch_resilient(conn, batch: list[str], since: date) -> tuple[int, int]:
+def fetch_batch_resilient(
+    conn,
+    batch: list[str],
+    since: date,
+    progress_callback: Callable[..., None] | None = None,
+    countries_total: int | None = None,
+) -> tuple[int, int]:
     """Fetch a batch, splitting it into smaller groups if the API times out."""
     try:
-        return fetch_batch(conn, batch, since)
+        return fetch_batch(conn, batch, since, progress_callback, countries_total)
     except Exception as exc:
+        conn.rollback()
         if len(batch) == 1:
             response = getattr(exc, "response", None)
             mark_country_fetch_finished(
@@ -1237,8 +1350,8 @@ def fetch_batch_resilient(conn, batch: list[str], since: date) -> tuple[int, int
             f"Retrying as smaller batches: {', '.join(left)} | {', '.join(right)}"
         )
 
-        left_upserted, left_new = fetch_batch_resilient(conn, left, since)
-        right_upserted, right_new = fetch_batch_resilient(conn, right, since)
+        left_upserted, left_new = fetch_batch_resilient(conn, left, since, progress_callback, countries_total)
+        right_upserted, right_new = fetch_batch_resilient(conn, right, since, progress_callback, countries_total)
         return left_upserted + right_upserted, left_new + right_new
 
 

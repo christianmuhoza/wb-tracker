@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jobs import MAX_RETRY_DELAY, retry_delay
+from jobs import MAX_RETRY_DELAY, job_idempotency_key, retry_delay
 
 
 def test_retry_delay_uses_exponential_backoff():
@@ -22,3 +22,10 @@ def test_retry_delay_is_bounded():
 @pytest.mark.parametrize("attempt_count", [0, -1])
 def test_retry_delay_handles_initial_attempt(attempt_count):
     assert retry_delay(attempt_count) == timedelta(minutes=1)
+
+
+def test_job_idempotency_key_is_order_independent():
+    first = job_idempotency_key("full_fetch", {"scope": "all", "with_bidders": True})
+    second = job_idempotency_key("full_fetch", {"with_bidders": True, "scope": "all"})
+
+    assert first == second

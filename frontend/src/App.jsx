@@ -10,7 +10,8 @@ import Bidders from './views/Bidders.jsx';
 import Borrowers from './views/Borrowers.jsx';
 import AwardAlerts from './views/AwardAlerts.jsx';
 import SoftwareOpportunities from './views/SoftwareOpportunities.jsx';
-import { Globe, FileSearch, Activity, SlidersHorizontal, Bell, Building, Cpu, LogOut } from 'lucide-react';
+import Operations from './views/Operations.jsx';
+import { Globe, FileSearch, Activity, SlidersHorizontal, Bell, Building, Cpu, LogOut, Server } from 'lucide-react';
 
 function ProtectedRoute({ children }) {
   if (!getToken()) return <Navigate to="/login" replace />;
@@ -26,6 +27,7 @@ function Sidebar({ username, onLogout }) {
     { to: '/bidders', label: 'Bidders', icon: Activity },
     { to: '/awards', label: 'Award Alerts', icon: Bell },
     { to: '/settings', label: 'Settings', icon: SlidersHorizontal },
+    { to: '/operations', label: 'Operations', icon: Server },
   ];
 
   const linkStyle = ({ isActive }) => ({
@@ -109,6 +111,7 @@ function AppLayout() {
             <Route path="/bidders" element={<Bidders />} />
             <Route path="/awards" element={<AwardAlerts />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/operations" element={<Operations />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </ErrorBoundary>

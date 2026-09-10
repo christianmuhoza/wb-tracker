@@ -330,10 +330,14 @@ def import_bidders_from_notice(
                     cur.execute(
                         """INSERT INTO bidders (name, category, country, created_at, updated_at)
                            VALUES (%s, %s, %s, NOW(), NOW())
+                           ON CONFLICT DO NOTHING
                            RETURNING id""",
                         (name, bidder_category, bidder_country),
                     )
                     row = cur.fetchone()
+                    if row is None:
+                        cur.execute("SELECT id FROM bidders WHERE lower(trim(name)) = lower(trim(%s))", (name,))
+                        row = cur.fetchone()
                     bidder_id = row["id"] if hasattr(row, "__getitem__") else row[0]
                     inserted += 1
 

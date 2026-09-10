@@ -75,6 +75,7 @@ def health_check() -> bool:
 def run_migrations() -> None:
     """Apply versioned database migrations before application services start."""
     alembic_config = Config(str(Path(__file__).with_name("alembic.ini")))
+    alembic_config.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
     command.upgrade(alembic_config, "head")
 
 

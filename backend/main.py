@@ -11,15 +11,18 @@ from config import CORS_ORIGINS, validate_runtime_configuration
 from db import ensure_support_tables, health_check, run_migrations
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from logging_config import configure_logging
 from routers.awards import router as awards_router
 from routers.bidders import router as bidders_router
 from routers.borrowers import router as borrowers_router
 from routers.export import router as export_router
 from routers.fetch import router as fetch_router
 from routers.notices import router as notices_router
+from routers.operations import router as operations_router
 from routers.settings import router as settings_router
 from routers.software import router as software_router
 
+configure_logging()
 log = logging.getLogger(__name__)
 
 # ── Background workers ────────────────────────────────────────────────────────
@@ -106,13 +109,26 @@ app.include_router(settings_router, dependencies=_auth_dep)
 app.include_router(software_router, dependencies=_auth_dep)
 app.include_router(fetch_router, dependencies=_auth_dep)
 app.include_router(export_router, dependencies=_auth_dep)
+app.include_router(operations_router)
 
 
 @app.get("/health")
 def health():
     db_ok = health_check()
+    queue = None
+    worker_status = "external" if not ENABLE_IN_PROCESS_WORKER else "unavailable"
+    try:
+        from jobs import job_summary
+
+        queue = job_summary()
+        if ENABLE_IN_PROCESS_WORKER:
+            worker_status = "ok" if _worker_thread and _worker_thread.is_alive() else "unavailable"
+    except Exception:
+        log.exception("Unable to collect job health")
     return {
-        "status": "ok" if db_ok else "degraded",
+        "status": "ok" if db_ok and worker_status != "unavailable" else "degraded",
         "database": "ok" if db_ok else "unreachable",
+        "worker": worker_status,
+        "jobs": queue,
         "version": app.version,
     }

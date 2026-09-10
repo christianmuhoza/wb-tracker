@@ -49,6 +49,8 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r backend/requirements.txt
+      - name: Apply database migrations
+        run: cd backend && python -m alembic -c alembic.ini upgrade head
       - name: Run backend tests
         run: cd backend && python -m pytest tests/ -v --tb=short
 

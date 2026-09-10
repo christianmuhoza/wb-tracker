@@ -145,7 +145,12 @@ def get_current_user(
     if credentials is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     payload = decode_token(credentials.credentials)
-    return {"username": payload.get("sub"), "authenticated": True}
+    user = get_user_by_username(payload.get("sub", ""))
+    return {
+        "username": payload.get("sub"),
+        "role": ("admin" if user and user.get("is_admin") else user.get("role", "viewer")) if user else "viewer",
+        "authenticated": True,
+    }
 
 
 def require_auth(

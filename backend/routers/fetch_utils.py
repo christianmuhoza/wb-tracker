@@ -8,7 +8,7 @@ from db import get_app_settings_map, q
 log = logging.getLogger(__name__)
 
 
-def run_full_fetch(payload: dict) -> dict:
+def run_full_fetch(payload: dict, job_id: int | None = None) -> dict:
     """Full fetch: all countries from baseline, then bidder import + award alerts."""
     import fetcher
     from routers.awards import sync_award_alerts
@@ -16,13 +16,19 @@ def run_full_fetch(payload: dict) -> dict:
 
     since = _resolve_since(payload.get("since"))
     with_bidders = payload.get("with_bidders", True)
+    report = _progress_reporter(job_id)
 
     fetcher.init_db()
     conn = fetcher.get_connection()
     try:
         country_rows = q("SELECT name FROM target_countries ORDER BY name")
         countries = [r["name"] for r in country_rows]
-        upserted, new_records = fetcher.fetch_batch_resilient(conn, countries, since)
+        report(
+            stage="fetching", message=f"Starting fetch for {len(countries)} countries", countries_total=len(countries)
+        )
+        upserted, new_records = fetcher.fetch_batch_resilient(
+            conn, countries, since, progress_callback=report, countries_total=len(countries)
+        )
         failed_rows = q(
             "SELECT country FROM country_fetch_status WHERE country = ANY(%s) AND status = 'failed' ORDER BY country",
             (countries,),
@@ -37,6 +43,7 @@ def run_full_fetch(payload: dict) -> dict:
     bidder_result = None
     alert_result = None
     if success and with_bidders:
+        report(stage="importing_bidders", message="Importing missing bidders", countries_total=len(countries))
         bidder_result = {"countries": {}}
         for c in countries:
             try:
@@ -44,6 +51,7 @@ def run_full_fetch(payload: dict) -> dict:
             except Exception as e:
                 bidder_result["countries"][c] = {"status": "error", "error": str(e)}
     try:
+        report(stage="syncing_alerts", message="Synchronizing award alerts")
         alert_result = sync_award_alerts()
     except Exception as e:
         alert_result = {"status": "error", "error": str(e)}
@@ -58,11 +66,12 @@ def run_full_fetch(payload: dict) -> dict:
     }
 
 
-def run_country_backfill(payload: dict) -> dict:
+def run_country_backfill(payload: dict, job_id: int | None = None) -> dict:
     """Backfill a single country pipeline."""
     name = payload["name"]
     since = _resolve_since(payload.get("since"))
     with_bidders = payload.get("with_bidders", True)
+    report = _progress_reporter(job_id)
 
     import fetcher
     from routers.awards import sync_award_alerts
@@ -71,7 +80,10 @@ def run_country_backfill(payload: dict) -> dict:
     fetcher.init_db()
     conn = fetcher.get_connection()
     try:
-        upserted, new_records = fetcher.fetch_batch_resilient(conn, [name], since)
+        report(stage="fetching", message=f"Starting fetch for {name}", current_country=name, countries_total=1)
+        upserted, new_records = fetcher.fetch_batch_resilient(
+            conn, [name], since, progress_callback=report, countries_total=1
+        )
         rows = q("SELECT status, error_msg FROM country_fetch_status WHERE country = %s", [name])
         country_status = rows[0]["status"] if rows else "unknown"
         error_msg = rows[0]["error_msg"] if rows else None
@@ -84,11 +96,13 @@ def run_country_backfill(payload: dict) -> dict:
     alert_result = None
     if success:
         if with_bidders:
+            report(stage="importing_bidders", message=f"Importing bidders for {name}", current_country=name)
             try:
                 bidder_result = import_missing_awards_by_country(name)
             except Exception as e:
                 bidder_result = {"status": "error", "error": str(e)}
         try:
+            report(stage="syncing_alerts", message="Synchronizing award alerts")
             alert_result = sync_award_alerts()
         except Exception as e:
             alert_result = {"status": "error", "error": str(e)}
@@ -101,6 +115,18 @@ def run_country_backfill(payload: dict) -> dict:
         "bidder_import": bidder_result,
         "award_alerts": alert_result,
     }
+
+
+def _progress_reporter(job_id: int | None):
+    if job_id is None:
+        return lambda **_: None
+
+    from jobs import update_job_progress
+
+    def report(**progress):
+        update_job_progress(job_id, **progress)
+
+    return report
 
 
 def _resolve_since(since_str) -> date:
