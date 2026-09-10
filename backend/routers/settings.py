@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 
-from auth import require_auth
+from auth import require_admin
 from db import db, ensure_support_tables, get_app_settings_map, q
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -36,7 +36,7 @@ def list_countries():
 
 
 @router.post("/countries", status_code=201)
-def add_country(body: CountryBody, _auth: dict = Depends(require_auth)):
+def add_country(body: CountryBody, _auth: dict = Depends(require_admin)):
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "Country name cannot be empty")
@@ -59,7 +59,7 @@ def add_country(body: CountryBody, _auth: dict = Depends(require_auth)):
 
 
 @router.post("/countries/bulk", status_code=201)
-def add_countries_bulk(body: CountriesBody, _auth: dict = Depends(require_auth)):
+def add_countries_bulk(body: CountriesBody, _auth: dict = Depends(require_admin)):
     names = [n.strip() for n in body.names if n and n.strip()]
     if not names:
         raise HTTPException(400, "No country names provided")
@@ -86,7 +86,7 @@ def add_countries_bulk(body: CountriesBody, _auth: dict = Depends(require_auth))
 
 
 @router.delete("/countries/{name}")
-def remove_country(name: str, _: dict = Depends(require_auth)):
+def remove_country(name: str, _: dict = Depends(require_admin)):
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM target_countries WHERE name = %s RETURNING name", (name,))
@@ -110,7 +110,7 @@ def get_general_settings():
 
 
 @router.put("/general")
-def update_general_settings(body: GeneralSettingsBody, _: dict = Depends(require_auth)):
+def update_general_settings(body: GeneralSettingsBody, _: dict = Depends(require_admin)):
     ensure_support_tables()
     updates = {
         "baseline_date": body.baseline_date,

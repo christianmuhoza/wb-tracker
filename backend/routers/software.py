@@ -4,7 +4,7 @@ from typing import Any
 
 import openpyxl
 import requests
-from auth import require_auth
+from auth import require_operator
 from db import db, q
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -28,24 +28,7 @@ class SoftwareClassificationReview(BaseModel):
 
 
 def ensure_software_intelligence_schema():
-    statements = [
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS is_software_related BOOLEAN",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_work_type TEXT",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_product_category TEXT",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_product_name TEXT",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_confidence TEXT",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_reason TEXT",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_classification_source TEXT",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_classified_at TIMESTAMPTZ",
-        "ALTER TABLE procurement_notices ADD COLUMN IF NOT EXISTS software_reviewed BOOLEAN NOT NULL DEFAULT FALSE",
-        "CREATE INDEX IF NOT EXISTS idx_notices_software_related ON procurement_notices (is_software_related)",
-        "CREATE INDEX IF NOT EXISTS idx_notices_software_category ON procurement_notices (software_product_category)",
-    ]
-    with db() as conn:
-        with conn.cursor() as cur:
-            for statement in statements:
-                cur.execute(statement)
-        conn.commit()
+    return None
 
 
 def save_software_classification(notice_id: str, result: dict, reviewed: bool = False):
@@ -86,7 +69,7 @@ def save_software_classification(notice_id: str, result: dict, reviewed: bool = 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.get("/")
+@router.get("")
 def get_software_opportunities(
     country: str | None = Query(None),
     product_category: str | None = Query(None),
@@ -152,7 +135,7 @@ def get_software_opportunities(
 
 
 @router.post("/{notice_id}/classify", dependencies=[Depends(rate_limited(STRICT_LIMITER))])
-def classify_software_opportunity(notice_id: str, _: dict = Depends(require_auth)):
+def classify_software_opportunity(notice_id: str, _: dict = Depends(require_operator)):
     ensure_software_intelligence_schema()
     rows = q("SELECT * FROM procurement_notices WHERE id = %s", [notice_id])
     if not rows:
@@ -168,7 +151,7 @@ def classify_software_opportunity(notice_id: str, _: dict = Depends(require_auth
 
 
 @router.post("/classify-pending", dependencies=[Depends(rate_limited(STRICT_LIMITER))])
-def classify_pending_software_opportunities(limit: int = Query(10, ge=1, le=25), _: dict = Depends(require_auth)):
+def classify_pending_software_opportunities(limit: int = Query(10, ge=1, le=25), _: dict = Depends(require_operator)):
     ensure_software_intelligence_schema()
     tech_condition, tech_params = build_tech_notice_condition("pn")
     notices = q(
@@ -193,7 +176,9 @@ def classify_pending_software_opportunities(limit: int = Query(10, ge=1, le=25),
 
 
 @router.put("/{notice_id}/review")
-def review_software_opportunity(notice_id: str, body: SoftwareClassificationReview, _: dict = Depends(require_auth)):
+def review_software_opportunity(
+    notice_id: str, body: SoftwareClassificationReview, _: dict = Depends(require_operator)
+):
     ensure_software_intelligence_schema()
     result = body.model_dump()
     if result["work_type"] not in {"new_build", "enhancement", "integration", "implementation", "support", "other"}:

@@ -50,7 +50,7 @@ jobs:
           cache: pip
       - run: pip install -r backend/requirements.txt
       - name: Run backend tests
-        run: cd backend && python -m utils_run_tests || python -m pytest tests/ -v --tb=short || true
+        run: cd backend && python -m pytest tests/ -v --tb=short
 
   frontend:
     name: Frontend Build, Lint & Test
@@ -67,9 +67,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
-      - run: npx eslint src/ || true
+      - run: npx eslint src/
       - name: Run frontend tests
-        run: npx vitest run --reporter=verbose || true
+        run: npx vitest run --reporter=verbose
 
   security-scan:
     name: Dependency Security Scan
@@ -81,8 +81,8 @@ jobs:
           python-version: "3.11"
       - run: pip install pip-audit
       - name: Audit Python dependencies
-        run: pip-audit -r backend/requirements.txt || true
+        run: pip-audit -r backend/requirements.txt
       - name: Audit frontend dependencies
         run: |
           cd frontend
-          npm audit --audit-level=high || true
+          npm audit --audit-level=high

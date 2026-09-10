@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 
 import openpyxl
-from auth import require_auth
+from auth import require_operator
 from db import db, q
 from fastapi import APIRouter, Depends, HTTPException, Query
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -244,7 +244,7 @@ def _safe_sheet_title(title: str, fallback: str) -> str:
 
 @router.post("/from_notice")
 def import_bidders_from_notice(
-    notice_id: str = Query(None), fetch_detail: bool = Query(False), _: dict = Depends(require_auth)
+    notice_id: str = Query(None), fetch_detail: bool = Query(False), _: dict = Depends(require_operator)
 ):
     """
     Extract bidders from a stored notice and upsert into `bidders` and `bidder_awards`.
@@ -405,7 +405,7 @@ def import_bidders_from_notice(
 # ── List bidders with aggregated stats ────────────────────────────────────────
 
 
-@router.get("/")
+@router.get("")
 def list_bidders(
     qs: str | None = Query(None, description="Search by name (legacy param)"),
     search: str | None = Query(None, description="Search by name or org"),
@@ -606,7 +606,7 @@ def get_bidder_notices(bidder_id: int):
 
 
 @router.put("/{bidder_id}")
-def update_bidder(bidder_id: int, body: BidderUpdate, _: dict = Depends(require_auth)):
+def update_bidder(bidder_id: int, body: BidderUpdate, _: dict = Depends(require_operator)):
     fields = {k: v for k, v in body.dict().items() if v is not None}
     if not fields:
         return {"status": "ok"}
@@ -625,7 +625,7 @@ def update_bidder(bidder_id: int, body: BidderUpdate, _: dict = Depends(require_
 
 
 @router.delete("/{bidder_id}")
-def delete_bidder(bidder_id: int, _: dict = Depends(require_auth)):
+def delete_bidder(bidder_id: int, _: dict = Depends(require_operator)):
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id, name FROM bidders WHERE id = %s", [bidder_id])
@@ -641,7 +641,7 @@ def delete_bidder(bidder_id: int, _: dict = Depends(require_auth)):
 
 
 @router.post("/import_missing")
-def import_missing_awards(fetch_detail: bool = Query(False), _: dict = Depends(require_auth)):
+def import_missing_awards(fetch_detail: bool = Query(False), _: dict = Depends(require_operator)):
     notices = q("""
         SELECT pn.id
         FROM procurement_notices pn
@@ -666,7 +666,7 @@ def import_missing_awards(fetch_detail: bool = Query(False), _: dict = Depends(r
 def import_awards_all(
     fetch_detail: bool = Query(False),
     country: str | None = Query(None),
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     """Batch import bidders for all award notices, optionally limited to one country. Runs in background."""
 
@@ -714,7 +714,7 @@ def import_awards_all(
 def import_bidders_by_country(
     country: str = Query(..., description="Import bidders only for this country"),
     fetch_detail: bool = Query(False),
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     if not country or not country.strip():
         raise HTTPException(status_code=400, detail="country is required")
@@ -725,7 +725,7 @@ def import_bidders_by_country(
 def import_missing_awards_by_country(
     country: str = Query(..., description="Import missing bidder links only for this country"),
     fetch_detail: bool = Query(False),
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     normalized_country = (country or "").strip()
     if not normalized_country:
@@ -769,7 +769,7 @@ def import_missing_awards_by_country(
 def enrich_all_bidders(
     missing_only: bool = Query(True, description="Only enrich bidders missing contact info"),
     limit: int = Query(50, ge=1, le=500),
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     if missing_only:
         rows = q(
@@ -839,7 +839,7 @@ def enrich_all_bidders(
 
 
 @router.post("/{bidder_id}/enrich", dependencies=[Depends(rate_limited(STRICT_LIMITER))])
-def enrich_bidder_contact(bidder_id: int, _: dict = Depends(require_auth)):
+def enrich_bidder_contact(bidder_id: int, _: dict = Depends(require_operator)):
     rows = q("SELECT * FROM bidders WHERE id = %s", [bidder_id])
     if not rows:
         raise HTTPException(status_code=404, detail="Bidder not found")
@@ -877,7 +877,7 @@ def enrich_bidder_contact(bidder_id: int, _: dict = Depends(require_auth)):
 
 
 @router.post("/{bidder_id}/enrich_gemini", dependencies=[Depends(rate_limited(STRICT_LIMITER))])
-def enrich_bidder_gemini(bidder_id: int, _: dict = Depends(require_auth)):
+def enrich_bidder_gemini(bidder_id: int, _: dict = Depends(require_operator)):
     # 1. Fetch bidder details
     rows = q("SELECT * FROM bidders WHERE id = %s", [bidder_id])
     if not rows:

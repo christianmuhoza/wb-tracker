@@ -3,22 +3,23 @@ from logging.config import fileConfig
 
 from alembic import context
 from dotenv import load_dotenv
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import URL, engine_from_config, pool
 
 load_dotenv()
 
 config = context.config
 
-config.set_main_option(
-    "sqlalchemy.url",
-    "postgresql://{}:{}@{}:{}/{}".format(
-        os.getenv("DB_USER", "postgres"),
-        os.getenv("DB_PASSWORD", ""),
-        os.getenv("DB_HOST", "localhost"),
-        os.getenv("DB_PORT", "5432"),
-        os.getenv("DB_NAME", "wb_tracker"),
-    ),
-)
+database_url = os.getenv("DATABASE_URL")
+if not database_url:
+    database_url = URL.create(
+        "postgresql",
+        username=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", ""),
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        database=os.getenv("DB_NAME", "wb_tracker"),
+    ).render_as_string(hide_password=False)
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

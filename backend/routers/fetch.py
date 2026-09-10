@@ -2,13 +2,13 @@
 
 from datetime import date
 
-from auth import require_auth
+from auth import require_operator
 from db import ensure_support_tables, q
 from fastapi import APIRouter, Depends, HTTPException, Query
 from jobs import enqueue_job, get_job, list_jobs
 from ratelimit import STRICT_LIMITER, rate_limited
 
-router = APIRouter(prefix="/api/fetch", tags=["fetch"], dependencies=[Depends(require_auth)])
+router = APIRouter(prefix="/api/fetch", tags=["fetch"], dependencies=[Depends(require_operator)])
 
 # Backwards-compatible in-memory status that mirrors the most recent job.
 # Frontend polls this; the bat-signal lights when a job is running.
@@ -66,7 +66,7 @@ def _sync_status_from_job(job_id: int | None):
 
 @router.post("/", dependencies=[Depends(rate_limited(STRICT_LIMITER))])
 def trigger_fetch(
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     """Trigger a full fetch via the durable job queue."""
     job_id = enqueue_job("full_fetch", {"scope": "all"})
@@ -97,7 +97,7 @@ def trigger_country_backfill(
     name: str,
     since: date | None = Query(None),
     with_bidders: bool = Query(True),
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     ensure_support_tables()
     country_rows = q("SELECT name FROM target_countries WHERE name = %s", [name])
@@ -119,7 +119,7 @@ def trigger_country_backfill(
 def trigger_full_backfill(
     since: date | None = Query(None),
     with_bidders: bool = Query(True),
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     """Backfill all countries from baseline then import bidders and sync alerts."""
     ensure_support_tables()

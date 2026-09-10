@@ -34,12 +34,14 @@ def _run_once():
 
 
 def main():
+    from db import run_migrations
     from jobs import (
         ensure_jobs_table,
         scheduler_loop,
         worker_loop,
     )
 
+    run_migrations()
     ensure_jobs_table()
     stop_event = threading.Event()
 

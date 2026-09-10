@@ -108,96 +108,11 @@ def status_label(success: bool, row_count: int, fetched: int, error_msg: str | N
 
 
 def init_db():
-    """Create all tables and indexes if they don't exist."""
-    countries_sql = ",".join(f"'{c.replace(chr(39), chr(39)+chr(39))}'" for c in CONFIG_DEFAULT_COUNTRIES)
-    ddl = f"""
-    CREATE TABLE IF NOT EXISTS target_countries (
-        id    SERIAL PRIMARY KEY,
-        name  TEXT UNIQUE NOT NULL
-    );
+    """Apply versioned migrations and seed configured countries."""
+    from db import run_migrations
 
-    INSERT INTO target_countries (name)
-    SELECT unnest(ARRAY[{countries_sql}])
-    ON CONFLICT (name) DO NOTHING;
-
-    DELETE FROM target_countries WHERE name IN ('Uganda');
-    UPDATE target_countries
-    SET name = 'Somalia, Federal Republic of'
-    WHERE name = 'Somalia';
-
-    CREATE TABLE IF NOT EXISTS procurement_notices (
-        id                      TEXT PRIMARY KEY,
-        project_id              TEXT,
-        project_name            TEXT,
-        country                 TEXT,
-        notice_no               TEXT,
-        notice_type             TEXT,
-        notice_status           TEXT,
-        procurement_method      TEXT,
-        language                TEXT,
-        title                   TEXT,
-        description             TEXT,
-        borrower_bid_reference  TEXT,
-        notice_date             DATE,
-        submission_deadline     TIMESTAMPTZ,
-        submission_date         DATE,
-        contract_amount         NUMERIC,
-        currency                TEXT,
-        borrower                TEXT,
-        contact_name            TEXT,
-        contact_org             TEXT,
-        contact_address         TEXT,
-        contact_city            TEXT,
-        contact_phone           TEXT,
-        contact_email           TEXT,
-        contact_website         TEXT,
-        url                     TEXT,
-        status                  TEXT,
-        fetched_at              TIMESTAMPTZ DEFAULT NOW(),
-        updated_at              TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_country     ON procurement_notices (country);
-    CREATE INDEX IF NOT EXISTS idx_notice_type ON procurement_notices (notice_type);
-    CREATE INDEX IF NOT EXISTS idx_notice_date ON procurement_notices (notice_date);
-    CREATE INDEX IF NOT EXISTS idx_status      ON procurement_notices (status);
-
-    CREATE TABLE IF NOT EXISTS fetch_runs (
-        id          SERIAL PRIMARY KEY,
-        run_at      TIMESTAMPTZ DEFAULT NOW(),
-        country     TEXT,
-        notice_type TEXT,
-        fetched     INT,
-        new_records INT,
-        success     BOOLEAN,
-        error_msg   TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS country_fetch_status (
-        country              TEXT PRIMARY KEY,
-        status               TEXT NOT NULL DEFAULT 'not_started',
-        last_started_at      TIMESTAMPTZ,
-        last_finished_at     TIMESTAMPTZ,
-        last_success_at      TIMESTAMPTZ,
-        last_attempted_since DATE,
-        last_page_size       INT,
-        fetched_records      INT DEFAULT 0,
-        new_records          INT DEFAULT 0,
-        total_available      INT DEFAULT 0,
-        row_count            INT DEFAULT 0,
-        first_notice_date    DATE,
-        last_notice_date     DATE,
-        error_msg            TEXT,
-        api_url              TEXT,
-        retry_count          INT DEFAULT 0,
-        updated_at           TIMESTAMPTZ DEFAULT NOW()
-    );
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(ddl)
-        conn.commit()
-    log.info("Database initialised.")
+    run_migrations()
+    log.info("Database migrations applied.")
 
 
 def get_target_countries() -> list[str]:
@@ -214,22 +129,6 @@ def get_target_countries() -> list[str]:
 
 def get_app_settings() -> dict:
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS app_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            INSERT INTO app_settings (key, value)
-            VALUES
-                ('baseline_date', (CURRENT_DATE - INTERVAL '2 years')::text),
-                ('country_batch', '5'),
-                ('request_delay', '1.2'),
-                ('auto_sync_hour', '06:00')
-            ON CONFLICT (key) DO NOTHING
-        """)
         cur.execute("SELECT key, value FROM app_settings")
         rows = cur.fetchall()
         conn.commit()

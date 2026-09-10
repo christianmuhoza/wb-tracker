@@ -8,6 +8,7 @@ managed through the API and the env vars are not required.
 
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import bcrypt
 import jwt
@@ -23,6 +24,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 security = HTTPBearer(auto_error=False)
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
+
 
 def create_access_token(data: dict) -> str:
     payload = {
@@ -44,6 +46,7 @@ def decode_token(token: str) -> dict:
 
 # ── Database user helpers ─────────────────────────────────────────────────────
 
+
 def _ensure_users_table():
     ensure_support_tables()
 
@@ -53,6 +56,7 @@ def seed_admin_from_env() -> None:
     ADMIN_PASSWORD_HASH env vars are present, create that admin. Safe to call
     on every startup — it only acts when there are no users."""
     import os
+
     _ensure_users_table()
     existing = q("SELECT 1 FROM users LIMIT 1")
     if existing:
@@ -90,6 +94,7 @@ def hash_password(plain: str) -> str:
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -104,11 +109,13 @@ class LoginResponse(BaseModel):
 class UserCreate(BaseModel):
     username: str
     password: str
+    role: Literal["viewer", "operator", "admin"] = "viewer"
 
 
 class UserUpdate(BaseModel):
     password: str | None = None
     is_active: bool | None = None
+    role: Literal["viewer", "operator", "admin"] | None = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -117,6 +124,7 @@ class ChangePasswordRequest(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
 
 @router.post("/login", response_model=LoginResponse)
 def login(body: LoginRequest):
@@ -150,6 +158,14 @@ def require_auth(
     user = get_user_by_username(payload.get("sub", ""))
     if not user or not user.get("is_active", False):
         raise HTTPException(status_code=401, detail="Authentication required")
+    payload["role"] = "admin" if user.get("is_admin") else user.get("role", "viewer")
+    return payload
+
+
+def require_operator(payload: dict = Depends(require_auth)) -> dict:
+    """Require an active operator or administrator account."""
+    if payload.get("role") not in {"operator", "admin"}:
+        raise HTTPException(status_code=403, detail="Operator access required")
     return payload
 
 
@@ -163,7 +179,7 @@ def require_admin(payload: dict = Depends(require_auth)) -> dict:
 
 @router.get("/users")
 def list_users(_: dict = Depends(require_admin)):
-    rows = q("SELECT id, username, is_active, is_admin, created_at, updated_at FROM users ORDER BY id")
+    rows = q("SELECT id, username, is_active, is_admin, role, created_at, updated_at FROM users ORDER BY id")
     return [dict(r) for r in rows]
 
 
@@ -177,8 +193,8 @@ def create_user(body: UserCreate, _: dict = Depends(require_admin)):
     _ensure_users_table()
     try:
         q(
-            "INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id",
-            (username, hash_password(body.password)),
+            "INSERT INTO users (username, password_hash, is_admin, role) VALUES (%s, %s, %s, %s) RETURNING id",
+            (username, hash_password(body.password), body.role == "admin", body.role),
         )
     except Exception as exc:
         raise HTTPException(status_code=409, detail="Username already exists") from exc
@@ -190,19 +206,39 @@ def update_user(username: str, body: UserUpdate, _: dict = Depends(require_admin
     user = get_user_by_username(username)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    is_demoting_last_admin = user.get("is_admin", False) and (
+        body.role is not None and body.role != "admin" or body.is_active is False
+    )
+    if is_demoting_last_admin:
+        admins = q("SELECT COUNT(*) AS count FROM users WHERE is_admin AND is_active")
+        if admins and admins[0]["count"] <= 1:
+            raise HTTPException(status_code=400, detail="At least one active administrator is required")
     if body.password:
         q(
             "UPDATE users SET password_hash = %s, updated_at = NOW() WHERE username = %s",
             (hash_password(body.password), username),
         )
-    if body.is_active is not None:
-        q("UPDATE users SET is_active = %s, updated_at = NOW() WHERE username = %s",
-          [body.is_active, username])
+    if body.is_active is not None or body.role is not None:
+        role = body.role or ("admin" if user.get("is_admin") else user.get("role", "viewer"))
+        q(
+            "UPDATE users SET is_active = %s, updated_at = NOW() WHERE username = %s",
+            [body.is_active if body.is_active is not None else user.get("is_active", True), username],
+        )
+        if body.role is not None:
+            q(
+                "UPDATE users SET role = %s, is_admin = %s, updated_at = NOW() WHERE username = %s",
+                [role, role == "admin", username],
+            )
     return {"username": username, "updated": True}
 
 
 @router.delete("/users/{username}")
 def delete_user(username: str, _: dict = Depends(require_admin)):
+    user = get_user_by_username(username)
+    if user and user.get("is_admin"):
+        admins = q("SELECT COUNT(*) AS count FROM users WHERE is_admin AND is_active")
+        if admins and admins[0]["count"] <= 1:
+            raise HTTPException(status_code=400, detail="At least one active administrator is required")
     rows = q("DELETE FROM users WHERE username = %s RETURNING username", [username])
     if not rows:
         raise HTTPException(status_code=404, detail="User not found")
@@ -223,6 +259,8 @@ def change_password(body: ChangePasswordRequest, payload: dict = Depends(require
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     if len(body.new_password) < 8:
         raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
-    q("UPDATE users SET password_hash = %s, updated_at = NOW() WHERE username = %s",
-      (hash_password(body.new_password), username))
+    q(
+        "UPDATE users SET password_hash = %s, updated_at = NOW() WHERE username = %s",
+        (hash_password(body.new_password), username),
+    )
     return {"message": "Password updated"}

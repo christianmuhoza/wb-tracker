@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from auth import require_auth
+from auth import require_auth, require_operator
 from db import db, ensure_support_tables, q
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -14,40 +14,6 @@ router = APIRouter(prefix="/api/award-alerts", tags=["awards"])
 
 def ensure_award_alert_tables():
     ensure_support_tables()
-    with db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS award_alerts (
-                    id SERIAL PRIMARY KEY,
-                    source_notice_id TEXT NOT NULL REFERENCES procurement_notices(id) ON DELETE CASCADE,
-                    award_notice_id TEXT NOT NULL REFERENCES procurement_notices(id) ON DELETE CASCADE,
-                    match_status TEXT NOT NULL DEFAULT 'auto_matched',
-                    match_score INT NOT NULL DEFAULT 0,
-                    matched_reason TEXT,
-                    seen_at TIMESTAMPTZ,
-                    dismissed_at TIMESTAMPTZ,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(source_notice_id, award_notice_id)
-                )
-            """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_seen ON award_alerts (seen_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_status ON award_alerts (match_status)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_award_alerts_award ON award_alerts (award_notice_id)")
-            # These indexes support the two legitimate candidate paths: an exact
-            # procurement reference, or a same-project comparison for review.
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_notices_award_match_reference
-                ON procurement_notices
-                ((regexp_replace(upper(COALESCE(borrower_bid_reference, '')), '[^A-Z0-9]+', '', 'g')))
-                WHERE notice_type IN ('IFB', 'REOI')
-            """)
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_notices_award_match_project
-                ON procurement_notices (country, project_id, notice_date)
-                WHERE notice_type IN ('IFB', 'REOI')
-            """)
-        conn.commit()
 
 
 def _norm_match_value(value):
@@ -56,9 +22,33 @@ def _norm_match_value(value):
 
 def _token_set(value):
     stop = {
-        "the", "and", "for", "of", "to", "in", "on", "with", "a", "an", "no", "number",
-        "contract", "award", "awarded", "procurement", "supply", "invitation", "bids", "bid",
-        "request", "expressions", "expression", "interest", "services", "goods", "works",
+        "the",
+        "and",
+        "for",
+        "of",
+        "to",
+        "in",
+        "on",
+        "with",
+        "a",
+        "an",
+        "no",
+        "number",
+        "contract",
+        "award",
+        "awarded",
+        "procurement",
+        "supply",
+        "invitation",
+        "bids",
+        "bid",
+        "request",
+        "expressions",
+        "expression",
+        "interest",
+        "services",
+        "goods",
+        "works",
     }
     return {
         token for token in re.findall(r"[a-z0-9]+", _norm_match_value(value)) if len(token) > 2 and token not in stop
@@ -288,11 +278,11 @@ def sync_award_alerts():
 
 
 @router.post("/sync")
-def sync_award_alerts_endpoint(_: dict = Depends(require_auth)):
+def sync_award_alerts_endpoint(_: dict = Depends(require_operator)):
     return sync_award_alerts()
 
 
-@router.get("/")
+@router.get("")
 def list_award_alerts(
     unread_only: bool = Query(False),
     status: str | None = Query(None),
@@ -599,7 +589,7 @@ def mark_all_award_alerts_seen(_: dict = Depends(require_auth)):
 def update_award_alert_status(
     alert_id: int,
     match_status: str = Query(..., regex="^(confirmed|rejected|needs_review|auto_matched)$"),
-    _: dict = Depends(require_auth),
+    _: dict = Depends(require_operator),
 ):
     ensure_award_alert_tables()
     dismissed_expr = "NOW()" if match_status == "rejected" else "NULL"

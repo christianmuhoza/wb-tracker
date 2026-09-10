@@ -631,7 +631,7 @@ def build_country_template_workbook(rows, countries, include_deadline: bool = Fa
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.get("/")
+@router.get("")
 def export_excel(
     country: str | None = None,
     notice_type: str | None = None,

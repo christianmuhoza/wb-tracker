@@ -100,7 +100,7 @@ def fetch_borrower_export_rows(search, country, notice_type):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.get("/")
+@router.get("")
 def list_borrowers(
     search: str | None = Query(None, description="Search by borrower name"),
     country: str | None = Query(None, description="Filter by country"),

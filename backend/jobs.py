@@ -23,29 +23,6 @@ JOB_STATES = ("queued", "running", "completed", "failed", "cancelled")
 
 def ensure_jobs_table():
     ensure_support_tables()
-    with db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS fetch_jobs (
-                    id            SERIAL PRIMARY KEY,
-                    job_type      TEXT NOT NULL CHECK (job_type = ANY(%s::text[])),
-                    payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    status        TEXT NOT NULL DEFAULT 'queued' CHECK (status = ANY(%s::text[])),
-                    progress      TEXT,
-                    error         TEXT,
-                    created_at    TIMESTAMPTZ DEFAULT NOW(),
-                    started_at    TIMESTAMPTZ,
-                    finished_at   TIMESTAMPTZ,
-                    updated_at    TIMESTAMPTZ DEFAULT NOW()
-                )
-            """,
-                # psycopg2 adapts lists to PostgreSQL arrays; tuples become
-                # records and cannot be cast to text[].
-                (list(JOB_TYPES), list(JOB_STATES)),
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_fetch_jobs_status ON fetch_jobs (status)")
-        conn.commit()
 
 
 def enqueue_job(job_type: str, payload: dict | None = None) -> int:

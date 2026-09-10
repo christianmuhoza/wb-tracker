@@ -5,10 +5,11 @@ import os
 import threading
 from contextlib import asynccontextmanager
 
+from auth import require_auth
 from auth import router as auth_router
 from config import CORS_ORIGINS, validate_runtime_configuration
-from db import ensure_support_tables, health_check
-from fastapi import FastAPI
+from db import ensure_support_tables, health_check, run_migrations
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.awards import router as awards_router
 from routers.bidders import router as bidders_router
@@ -66,11 +67,14 @@ async def lifespan(app: FastAPI):
     validate_runtime_configuration()
     log.info("WB Tracker API starting — CORS origins: %s", CORS_ORIGINS)
     try:
+        run_migrations()
         ensure_support_tables()
         from auth import seed_admin_from_env
+
         seed_admin_from_env()
     except Exception:
-        log.warning("Could not ensure support tables on startup (DB may be unavailable)")
+        log.exception("Database migrations or startup initialization failed")
+        raise
     _start_background_workers()
     yield
     _stop_background_workers()
@@ -91,15 +95,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_auth_dep = [Depends(require_auth)]
+
 app.include_router(auth_router)
-app.include_router(notices_router)
-app.include_router(bidders_router)
-app.include_router(borrowers_router)
-app.include_router(awards_router)
-app.include_router(settings_router)
-app.include_router(software_router)
-app.include_router(fetch_router)
-app.include_router(export_router)
+app.include_router(notices_router, dependencies=_auth_dep)
+app.include_router(bidders_router, dependencies=_auth_dep)
+app.include_router(borrowers_router, dependencies=_auth_dep)
+app.include_router(awards_router, dependencies=_auth_dep)
+app.include_router(settings_router, dependencies=_auth_dep)
+app.include_router(software_router, dependencies=_auth_dep)
+app.include_router(fetch_router, dependencies=_auth_dep)
+app.include_router(export_router, dependencies=_auth_dep)
 
 
 @app.get("/health")
