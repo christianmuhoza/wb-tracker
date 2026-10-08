@@ -1,4 +1,5 @@
 import io
+import json
 from datetime import datetime
 from typing import Any
 
@@ -20,6 +21,10 @@ router = APIRouter(prefix="/api/software-opportunities", tags=["software"])
 
 class SoftwareClassificationReview(BaseModel):
     is_software_related: bool
+    classification: str = "software"
+    classification_status: str = "classified"
+    technology_related: bool = True
+    primary_deliverable: str | None = None
     work_type: str = "other"
     product_category: str | None = None
     product_name: str | None = None
@@ -35,15 +40,34 @@ def save_software_classification(notice_id: str, result: dict, reviewed: bool = 
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT software_reviewed FROM procurement_notices WHERE id = %s",
+                [notice_id],
+            )
+            existing = cur.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Notice not found")
+            if existing["software_reviewed"] and not reviewed:
+                return
+            cur.execute(
                 """
                 UPDATE procurement_notices
                 SET is_software_related = %s,
+                    classification = %s,
+                    classification_status = %s,
+                    technology_related = %s,
+                    primary_deliverable = %s,
                     software_work_type = %s,
                     software_product_category = %s,
+                    software_subcategory = %s,
                     software_product_name = %s,
                     software_confidence = %s,
                     software_reason = %s,
-                    software_classification_source = 'gemini',
+                    classification_evidence = %s::jsonb,
+                    classifier_name = %s,
+                    classifier_version = %s,
+                    prompt_version = %s,
+                    classification_model = %s,
+                    software_classification_source = %s,
                     software_classified_at = NOW(),
                     software_reviewed = %s
                 WHERE id = %s
@@ -51,16 +75,49 @@ def save_software_classification(notice_id: str, result: dict, reviewed: bool = 
             """,
                 [
                     result["is_software_related"],
+                    result["classification"],
+                    result["classification_status"],
+                    result["technology_related"],
+                    result["primary_deliverable"],
                     result["work_type"],
                     result["product_category"],
+                    result["product_subcategory"],
                     result["product_name"],
                     result["confidence"],
                     result["reason"],
+                    json.dumps(result.get("evidence", [])),
+                    result["classifier_name"],
+                    result["classifier_version"],
+                    result["prompt_version"],
+                    result["classification_model"],
+                    result.get("source", "gemini"),
                     reviewed,
                     notice_id,
                 ],
             )
             row = cur.fetchone()
+            if row:
+                cur.execute(
+                    """
+                    INSERT INTO notice_classifications (
+                        notice_id, classification, classification_status, is_software_related,
+                        technology_related, primary_deliverable, software_work_type,
+                        software_product_category, software_subcategory, software_product_name,
+                        confidence, reason, evidence, rule_signals, classifier_name,
+                        classifier_version, prompt_version, classification_model, source, reviewed
+                    )
+                    SELECT id, classification, classification_status, is_software_related,
+                           technology_related, primary_deliverable, software_work_type,
+                           software_product_category, software_subcategory, software_product_name,
+                           software_confidence, software_reason,
+                           COALESCE(classification_evidence, '[]'::jsonb), %s::jsonb,
+                           classifier_name, classifier_version, prompt_version,
+                           classification_model, software_classification_source, %s
+                    FROM procurement_notices
+                    WHERE id = %s
+                    """,
+                    [json.dumps(result.get("rule_signals", {})), reviewed, notice_id],
+                )
         conn.commit()
     if not row:
         raise HTTPException(status_code=404, detail="Notice not found")
@@ -73,13 +130,16 @@ def save_software_classification(notice_id: str, result: dict, reviewed: bool = 
 def get_software_opportunities(
     country: str | None = Query(None),
     product_category: str | None = Query(None),
+    classification: str | None = Query(None),
+    classification_status: str | None = Query(None),
+    technology_related: bool | None = Query(None),
     min_confidence: str | None = Query(None, regex="^(high|medium|low)$"),
     unreviewed_only: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
 ):
     ensure_software_intelligence_schema()
-    filters = ["pn.is_software_related IS TRUE"]
+    filters = ["(pn.classification IS NOT NULL OR pn.is_software_related IS TRUE)"]
     params: list[Any] = []
     if country:
         filters.append("pn.country = %s")
@@ -87,6 +147,15 @@ def get_software_opportunities(
     if product_category:
         filters.append("pn.software_product_category ILIKE %s")
         params.append(f"%{product_category}%")
+    if classification:
+        filters.append("pn.classification = %s")
+        params.append(classification)
+    if classification_status:
+        filters.append("pn.classification_status = %s")
+        params.append(classification_status)
+    if technology_related is not None:
+        filters.append("pn.technology_related IS %s")
+        params.append(technology_related)
     if min_confidence:
         levels = {"high": ["high"], "medium": ["high", "medium"], "low": ["high", "medium", "low"]}
         filters.append("pn.software_confidence = ANY(%s)")
@@ -100,7 +169,9 @@ def get_software_opportunities(
         SELECT pn.id, pn.title, pn.country, pn.notice_type, pn.status, pn.notice_date::text,
                pn.submission_date::text, pn.url, pn.software_work_type,
                pn.software_product_category, pn.software_product_name,
-               pn.software_confidence, pn.software_reason, pn.software_reviewed,
+               pn.software_subcategory, pn.software_confidence, pn.software_reason,
+               pn.classification, pn.classification_status, pn.technology_related,
+               pn.primary_deliverable, pn.classification_evidence, pn.software_reviewed,
                COUNT(DISTINCT COALESCE(NULLIF(related.borrower_bid_reference, ''), related.id))
                    FILTER (WHERE related.is_software_related IS TRUE) AS category_demand_count,
                STRING_AGG(DISTINCT related.country, ', ' ORDER BY related.country)
@@ -185,34 +256,40 @@ def review_software_opportunity(
         raise HTTPException(status_code=422, detail="Invalid work_type")
     if result["confidence"] not in {"high", "medium", "low"}:
         raise HTTPException(status_code=422, detail="Invalid confidence")
+    if result["classification"] not in {
+        "software",
+        "hardware",
+        "civil_works",
+        "consulting",
+        "training",
+        "infrastructure",
+        "telecommunications",
+        "data_services",
+        "general_services",
+        "goods_supply",
+        "mixed",
+        "unclear",
+    }:
+        raise HTTPException(status_code=422, detail="Invalid classification")
     if not result["is_software_related"]:
         result.update({"work_type": "other", "product_category": None, "product_name": None})
-    with db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE procurement_notices
-                SET is_software_related = %s, software_work_type = %s,
-                    software_product_category = %s, software_product_name = %s,
-                    software_confidence = %s, software_reason = %s,
-                    software_classification_source = 'human', software_classified_at = NOW(),
-                    software_reviewed = TRUE
-                WHERE id = %s RETURNING id
-            """,
-                [
-                    result["is_software_related"],
-                    result["work_type"],
-                    result["product_category"],
-                    result["product_name"],
-                    result["confidence"],
-                    result["reason"],
-                    notice_id,
-                ],
-            )
-            row = cur.fetchone()
-        conn.commit()
-    if not row:
+    existing = q("SELECT * FROM procurement_notices WHERE id = %s", [notice_id])
+    if not existing:
         raise HTTPException(status_code=404, detail="Notice not found")
+    current = dict(existing[0])
+    result.update(
+        {
+            "product_subcategory": current.get("software_subcategory"),
+            "evidence": current.get("classification_evidence") or [],
+            "rule_signals": {},
+            "classifier_name": "human_review",
+            "classifier_version": "1",
+            "prompt_version": None,
+            "classification_model": None,
+            "source": "human",
+        }
+    )
+    save_software_classification(notice_id, result, reviewed=True)
     return {"status": "ok", "notice_id": notice_id, **result, "source": "human"}
 
 

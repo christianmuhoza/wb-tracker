@@ -286,6 +286,7 @@ def sync_award_alerts_endpoint(_: dict = Depends(require_operator)):
 def list_award_alerts(
     unread_only: bool = Query(False),
     status: str | None = Query(None),
+    software_only: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
 ):
@@ -297,10 +298,24 @@ def list_award_alerts(
     if status:
         filters.append("aa.match_status = %s")
         params.append(status)
+    if software_only:
+        filters.append(
+            "src.classification = 'software' "
+            "AND COALESCE(src.classification_status, 'classified') <> 'insufficient_evidence'"
+        )
     where = " AND ".join(filters)
     offset = (page - 1) * page_size
 
-    total_rows = q(f"SELECT COUNT(*) AS cnt FROM award_alerts aa WHERE {where}", params)
+    total_rows = q(
+        f"""
+        SELECT COUNT(*) AS cnt
+        FROM award_alerts aa
+        JOIN procurement_notices src ON src.id = aa.source_notice_id
+        JOIN procurement_notices award ON award.id = aa.award_notice_id
+        WHERE {where}
+        """,
+        params,
+    )
     unread_rows = q("SELECT COUNT(*) AS cnt FROM award_alerts aa WHERE aa.dismissed_at IS NULL AND aa.seen_at IS NULL")
     rows = q(
         f"""
@@ -344,6 +359,7 @@ def list_award_alerts(
                 FROM bidder_awards ba
                 JOIN bidders b ON b.id = ba.bidder_id
                 WHERE ba.notice_id = award.id AND ba.won IS TRUE
+                  AND LOWER(TRIM(b.name)) NOT IN ('ltd', 'limited', 'inc', 'llc', 'plc', 'corp', 'corporation')
             ), '') AS awarded_bidders
         FROM award_alerts aa
         JOIN procurement_notices src ON src.id = aa.source_notice_id
@@ -410,6 +426,7 @@ def list_award_alerts(
 def export_award_alerts(
     unread_only: bool = Query(False),
     status: str | None = Query(None),
+    software_only: bool = Query(False),
 ):
     ensure_award_alert_tables()
     filters = ["aa.dismissed_at IS NULL"]
@@ -419,6 +436,11 @@ def export_award_alerts(
     if status:
         filters.append("aa.match_status = %s")
         params.append(status)
+    if software_only:
+        filters.append(
+            "src.classification = 'software' "
+            "AND COALESCE(src.classification_status, 'classified') <> 'insufficient_evidence'"
+        )
     where = " AND ".join(filters)
 
     sql = f"""
@@ -460,6 +482,7 @@ def export_award_alerts(
                 FROM bidder_awards ba
                 JOIN bidders b ON b.id = ba.bidder_id
                 WHERE ba.notice_id = award.id AND ba.won IS TRUE
+                  AND LOWER(TRIM(b.name)) NOT IN ('ltd', 'limited', 'inc', 'llc', 'plc', 'corp', 'corporation')
             ), '') AS awarded_bidders
         FROM award_alerts aa
         JOIN procurement_notices src ON src.id = aa.source_notice_id

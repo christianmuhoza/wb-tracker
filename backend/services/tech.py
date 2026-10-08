@@ -212,6 +212,28 @@ TECH_BIDDER_SQL_PATTERN = (
     rf"(^|[^a-z0-9])({'|'.join(_sql_keyword_core(keyword) for keyword in TECH_BIDDER_NAME_KEYWORDS)})([^a-z0-9]|$)"
 )
 
+NON_TECH_STRATEGY_TERMS = (
+    "biomass strategy",
+    "review and update",
+    "review the current",
+    "strategy review",
+)
+
+STRONG_TECH_TERMS = (
+    "software",
+    "application",
+    "digital platform",
+    "information system",
+    "database",
+    "api",
+    "erp",
+    "cybersecurity",
+    "network",
+    "telecom",
+    "computer",
+    "ict",
+)
+
 
 def _tech_text_expr(alias: str = "") -> str:
     prefix = f"{alias}." if alias else ""
@@ -249,6 +271,9 @@ def classify_notice_tech(notice: dict[str, Any]) -> dict[str, Any]:
     for category, patterns in TECH_CATEGORY_PATTERNS.items():
         if any(pattern.search(text) for pattern in patterns):
             matched_categories.append(category)
+
+    if any(term in text for term in NON_TECH_STRATEGY_TERMS) and not any(term in text for term in STRONG_TECH_TERMS):
+        matched_categories = []
 
     return {
         "is_tech": bool(matched_categories),

@@ -5,10 +5,12 @@ import { apiPost } from '../api.js'
 
 export default function SoftwareOpportunities() {
   const [category, setCategory] = useState('')
+  const [classification, setClassification] = useState('software')
+  const [status, setStatus] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [running, setRunning] = useState(false)
   const [message, setMessage] = useState('')
-  const url = buildUrl('/api/software-opportunities', { product_category: category, page_size: 50 })
+  const url = buildUrl('/api/software-opportunities', { product_category: category, classification, classification_status: status, page_size: 50 })
   const { data, loading, error } = useApi(url, [refreshKey])
 
   const classifyPending = async () => {
@@ -36,7 +38,15 @@ export default function SoftwareOpportunities() {
       </button>
     </div>
     {message && <div style={{ marginBottom: 14, color: 'var(--text2)', fontSize: 13 }}>{message}</div>}
-    <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 18 }}>
+    <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 18, flexWrap: 'wrap' }}>
+      <label style={{ color: 'var(--text3)', fontSize: 12 }}>Deliverable</label>
+      <select value={classification} onChange={e => setClassification(e.target.value)} style={{ background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }}>
+        <option value="">All classifications</option><option value="software">Software</option><option value="hardware">Hardware</option><option value="consulting">Consulting</option><option value="mixed">Mixed</option><option value="unclear">Unclear</option>
+      </select>
+      <label style={{ color: 'var(--text3)', fontSize: 12 }}>Review state</label>
+      <select value={status} onChange={e => setStatus(e.target.value)} style={{ background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }}>
+        <option value="">All states</option><option value="classified">Classified</option><option value="needs_review">Needs review</option><option value="insufficient_evidence">Insufficient evidence</option>
+      </select>
       <label style={{ color: 'var(--text3)', fontSize: 12 }}>Product category</label>
       <input value={category} onChange={e => setCategory(e.target.value)} placeholder="e.g. identity system" style={{ width: 260, background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '8px 10px' }} />
     </div>
@@ -45,10 +55,10 @@ export default function SoftwareOpportunities() {
     {!loading && !error && <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
       <div style={{ padding: '12px 16px', color: 'var(--text2)', fontSize: 13 }}>{data?.total || 0} classified software opportunities</div>
       {(data?.data || []).map(row => <div key={row.id} style={{ padding: '15px 16px', borderTop: '1px solid var(--border)', display: 'grid', gridTemplateColumns: 'minmax(300px, 2fr) 1fr 110px 100px 32px', gap: 16, alignItems: 'center' }}>
-        <div><div style={{ fontWeight: 600 }}>{row.title}</div><div style={{ marginTop: 4, color: 'var(--text3)', fontSize: 12 }}>{row.country} · {row.notice_date || 'No date'} · {row.software_work_type}</div><div style={{ marginTop: 5, color: 'var(--text2)', fontSize: 12 }}>{row.software_reason}</div></div>
+        <div><div style={{ fontWeight: 600 }}>{row.title}</div><div style={{ marginTop: 4, color: 'var(--text3)', fontSize: 12 }}>{row.country} · {row.notice_date || 'No date'} · {row.software_work_type} · {row.primary_deliverable || 'Deliverable unclear'}</div><div style={{ marginTop: 5, color: 'var(--text2)', fontSize: 12 }}>{row.software_reason}</div>{row.classification_evidence?.length > 0 && <div style={{ marginTop: 6, color: 'var(--text3)', fontSize: 11 }}>Evidence: “{row.classification_evidence[0].quote}”</div>}</div>
         <div><div style={{ color: 'var(--accent)', fontSize: 13 }}>{row.software_product_category || 'Uncategorised'}</div><div style={{ color: 'var(--text3)', fontSize: 12 }}>{row.software_product_name}</div></div>
         <div style={{ color: 'var(--text2)', fontSize: 12 }}>Demand: <strong>{row.category_demand_count}</strong><div style={{ color: 'var(--text3)', fontSize: 11, marginTop: 3 }}>{row.demand_countries || 'No country data'}</div></div>
-        <div style={{ color: row.software_confidence === 'high' ? '#00d4aa' : '#f0a500', fontSize: 12 }}>{row.software_confidence} confidence</div>
+        <div style={{ color: row.classification_status === 'needs_review' ? '#ffb347' : row.software_confidence === 'high' ? '#00d4aa' : '#f0a500', fontSize: 12 }}>{row.classification_status || row.software_confidence}</div>
         <a href={row.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}><ExternalLink size={16} /></a>
       </div>)}
     </div>}

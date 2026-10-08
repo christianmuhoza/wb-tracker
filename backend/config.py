@@ -45,6 +45,7 @@ JWT_ALGORITHM: str = "HS256"
 JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))
 ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "")
 ADMIN_PASSWORD_HASH: str = os.getenv("ADMIN_PASSWORD_HASH", "")
+ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "")
 
 
 def validate_runtime_configuration() -> None:
@@ -61,6 +62,24 @@ def validate_runtime_configuration() -> None:
         raise RuntimeError("Missing required production configuration: JWT_SECRET")
     if len(JWT_SECRET) < 32:
         raise RuntimeError("JWT_SECRET must be at least 32 characters in production")
+
+
+# ── Password reset / email ────────────────────────────────────────────────────
+# Absolute base URL used to build links in outgoing emails
+# (e.g. https://tracker.example.com). Falls back to localhost in dev.
+APP_BASE_URL: str = os.getenv("APP_BASE_URL", "http://localhost:5173").rstrip("/")
+PASSWORD_RESET_EXPIRE_MINUTES: int = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", "30"))
+SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER: str = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM: str = os.getenv("SMTP_FROM", "")
+SMTP_STARTTLS: bool = os.getenv("SMTP_STARTTLS", "1") == "1"
+
+
+def email_configured() -> bool:
+    """True when outbound email is usable (host + sender present)."""
+    return bool(SMTP_HOST and (SMTP_FROM or SMTP_USER))
 
 
 # ── Fetcher ───────────────────────────────────────────────────────────────────

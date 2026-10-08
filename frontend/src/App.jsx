@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, NavLink, Navigate, useNavigate } from 're
 import { getToken, setToken, apiGet } from './api.js';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 import Login from './views/Login.jsx';
+import ForgotPassword from './views/ForgotPassword.jsx';
+import ResetPassword from './views/ResetPassword.jsx';
 import Overview from './views/Overview.jsx';
 import Notices from './views/Notices.jsx';
 import Settings from './views/Settings.jsx';
@@ -11,14 +13,15 @@ import Borrowers from './views/Borrowers.jsx';
 import AwardAlerts from './views/AwardAlerts.jsx';
 import SoftwareOpportunities from './views/SoftwareOpportunities.jsx';
 import Operations from './views/Operations.jsx';
-import { Globe, FileSearch, Activity, SlidersHorizontal, Bell, Building, Cpu, LogOut, Server } from 'lucide-react';
+import Users from './views/Users.jsx';
+import { Globe, FileSearch, Activity, SlidersHorizontal, Bell, Building, Cpu, LogOut, Server, Users2 } from 'lucide-react';
 
 function ProtectedRoute({ children }) {
   if (!getToken()) return <Navigate to="/login" replace />;
   return children;
 }
 
-function Sidebar({ username, onLogout }) {
+function Sidebar({ username, role, onLogout }) {
   const navItems = [
     { to: '/', label: 'Overview', icon: Globe, end: true },
     { to: '/notices', label: 'Notices', icon: FileSearch },
@@ -28,6 +31,7 @@ function Sidebar({ username, onLogout }) {
     { to: '/awards', label: 'Award Alerts', icon: Bell },
     { to: '/settings', label: 'Settings', icon: SlidersHorizontal },
     { to: '/operations', label: 'Operations', icon: Server },
+    ...(role === 'admin' ? [{ to: '/users', label: 'Users', icon: Users2 }] : []),
   ];
 
   const linkStyle = ({ isActive }) => ({
@@ -90,7 +94,23 @@ function Sidebar({ username, onLogout }) {
 
 function AppLayout() {
   const [username, setUsername] = useState(() => localStorage.getItem('wb-user') || 'admin');
+  const [role, setRole] = useState(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    let active = true;
+    apiGet('/auth/me')
+      .then(me => {
+        if (!active) return;
+        setRole(me.role || null);
+        if (me.username) {
+          setUsername(me.username);
+          localStorage.setItem('wb-user', me.username);
+        }
+      })
+      .catch(() => { if (active) setRole(null); });
+    return () => { active = false; };
+  }, []);
 
   const handleLogout = useCallback(() => {
     setToken(null);
@@ -100,7 +120,7 @@ function AppLayout() {
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      <Sidebar username={username} onLogout={handleLogout} />
+      <Sidebar username={username} role={role} onLogout={handleLogout} />
       <main style={{ flex: 1, overflow: 'auto', background: 'var(--bg)' }}>
         <ErrorBoundary>
           <Routes>
@@ -112,6 +132,7 @@ function AppLayout() {
             <Route path="/awards" element={<AwardAlerts />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/operations" element={<Operations />} />
+            <Route path="/users" element={role === 'admin' ? <Users /> : <Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </ErrorBoundary>
@@ -133,6 +154,12 @@ export default function App() {
       <Routes>
         <Route path="/login" element={
           loggedIn ? <Navigate to="/" replace /> : <Login onLogin={handleLogin} />
+        } />
+        <Route path="/forgot-password" element={
+          loggedIn ? <Navigate to="/" replace /> : <ForgotPassword />
+        } />
+        <Route path="/reset-password" element={
+          loggedIn ? <Navigate to="/" replace /> : <ResetPassword />
         } />
         <Route path="/*" element={
           <ProtectedRoute>

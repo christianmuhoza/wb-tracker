@@ -65,6 +65,19 @@ class TestClassifyNoticeTech(unittest.TestCase):
         self.assertFalse(result["is_tech"])
         self.assertIsNone(result["tech_category"])
 
+    def test_strategy_consulting_notice_is_not_software(self):
+        result = classify_notice_tech(
+            {
+                "title": "Hiring a consultant to review the current Biomass Strategy",
+                "description": "Hiring a consulting firm for the review and update of Rwanda's biomass strategy.",
+                "project_name": "Rwanda - Energy Access and Quality Improvement Project",
+                "procurement_method": "Quality And Cost-Based Selection",
+                "borrower_bid_reference": "RW-REG/EDCL-488891-CS-QCBS",
+            }
+        )
+        self.assertFalse(result["is_tech"])
+        self.assertIsNone(result["tech_category"])
+
     def test_empty_notice(self):
         result = classify_notice_tech({})
         self.assertFalse(result["is_tech"])

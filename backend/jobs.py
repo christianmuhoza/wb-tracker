@@ -79,7 +79,62 @@ def get_job(job_id: int) -> dict | None:
         rows = q("SELECT * FROM fetch_jobs WHERE id = %s", [job_id])
     except Exception:
         return None
-    return dict(rows[0]) if rows else None
+    return _add_legacy_run_counts(dict(rows[0])) if rows else None
+
+
+def _add_legacy_run_counts(job: dict) -> dict:
+    if job.get("progress_data", {}).get("run_counts"):
+        return job
+    if job.get("job_type") not in {"full_fetch", "country_backfill"} or job.get("status") != "completed":
+        return job
+    started_at = job.get("started_at")
+    finished_at = job.get("finished_at")
+    if not started_at or not finished_at:
+        return job
+    rows = q(
+        """
+        SELECT
+            COALESCE(SUM(new_records), 0) AS notices_added
+        FROM fetch_runs
+        WHERE run_at >= %s AND run_at <= %s
+        """,
+        [started_at, finished_at],
+    )
+    alert_rows = q(
+        """
+        SELECT COUNT(*) AS count
+        FROM award_alerts
+        WHERE created_at >= %s AND created_at <= %s
+        """,
+        [started_at, finished_at],
+    )
+    bidder_rows = q(
+        """
+        SELECT COUNT(*) AS count
+        FROM bidders
+        WHERE created_at >= %s AND created_at <= %s
+        """,
+        [started_at, finished_at],
+    )
+    borrower_rows = q(
+        """
+        SELECT COUNT(DISTINCT LOWER(TRIM(borrower))) AS count
+        FROM procurement_notices
+        WHERE fetched_at >= %s AND fetched_at <= %s
+          AND borrower IS NOT NULL AND TRIM(borrower) <> ''
+        """,
+        [started_at, finished_at],
+    )
+    progress_data = dict(job.get("progress_data") or {})
+    progress_data["run_counts"] = {
+        "notices_added": int(rows[0]["notices_added"]) if rows else 0,
+        "alerts_added": int(alert_rows[0]["count"]) if alert_rows else 0,
+        "bidders_added": int(bidder_rows[0]["count"]) if bidder_rows else 0,
+        "borrowers_added": int(borrower_rows[0]["count"]) if borrower_rows else 0,
+        "estimated": True,
+    }
+    job["progress_data"] = progress_data
+    return job
 
 
 def list_jobs(limit: int = 50, status: str | None = None) -> list[dict]:
@@ -157,6 +212,18 @@ def cancel_job(job_id: int) -> dict | None:
             updated_at = NOW()
         WHERE id = %s AND status IN ('queued', 'running')
         RETURNING *
+        """,
+        [job_id],
+    )
+    return dict(rows[0]) if rows else None
+
+
+def delete_job(job_id: int) -> dict | None:
+    rows = q(
+        """
+        DELETE FROM fetch_jobs
+        WHERE id = %s AND status IN ('completed', 'failed', 'cancelled')
+        RETURNING id, status
         """,
         [job_id],
     )
@@ -283,6 +350,13 @@ def claim_next_job() -> dict | None:
     return dict(row) if row else None
 
 
+def _notify_fetch_summary(job_id: int, job_type: str, payload: dict, result: dict) -> None:
+    """Best-effort post-fetch summary email; never affects job status."""
+    from fetch_summary import notify_fetch_summary
+
+    notify_fetch_summary(job_id, job_type, payload, result)
+
+
 def _run_job(job_id: int, job_type: str, payload: dict):
     try:
         if job_type == "full_fetch":
@@ -296,8 +370,13 @@ def _run_job(job_id: int, job_type: str, payload: dict):
                 locked_at=None,
                 heartbeat_at=None,
                 progress=result.get("stdout", "Done"),
-                progress_data={"stage": "completed", "message": result.get("stdout", "Done")},
+                progress_data={
+                    "stage": "completed",
+                    "message": result.get("stdout", "Done"),
+                    "run_counts": result.get("run_counts", {}),
+                },
             )
+            _notify_fetch_summary(job_id, job_type, payload, result)
         elif job_type == "country_backfill":
             from routers.fetch_utils import run_country_backfill
 
@@ -309,8 +388,13 @@ def _run_job(job_id: int, job_type: str, payload: dict):
                 locked_at=None,
                 heartbeat_at=None,
                 progress=result.get("stdout", "Done"),
-                progress_data={"stage": "completed", "message": result.get("stdout", "Done")},
+                progress_data={
+                    "stage": "completed",
+                    "message": result.get("stdout", "Done"),
+                    "run_counts": result.get("run_counts", {}),
+                },
             )
+            _notify_fetch_summary(job_id, job_type, payload, result)
         elif job_type == "sync_award_alerts":
             from routers.awards import sync_award_alerts
 

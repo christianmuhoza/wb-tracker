@@ -2,7 +2,7 @@
 
 from auth import require_operator
 from fastapi import APIRouter, Depends, HTTPException, Query
-from jobs import cancel_job, get_job, job_summary, list_jobs, retry_job
+from jobs import cancel_job, delete_job, get_job, job_summary, list_jobs, retry_job
 
 router = APIRouter(prefix="/api/operations", tags=["operations"], dependencies=[Depends(require_operator)])
 
@@ -39,3 +39,14 @@ def cancel_operation_job(job_id: int):
     if not job:
         raise HTTPException(status_code=409, detail="Only queued or running jobs can be cancelled")
     return job
+
+
+@router.delete("/jobs/{job_id}")
+def delete_operation_job(job_id: int):
+    job = delete_job(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=409,
+            detail="Only completed, failed, or cancelled jobs can be deleted",
+        )
+    return {"status": "deleted", "job_id": job["id"]}

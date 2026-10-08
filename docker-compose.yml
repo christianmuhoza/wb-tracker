@@ -22,6 +22,8 @@ services:
       context: ./backend
     container_name: wbtracker_backend
     restart: unless-stopped
+    env_file:
+      - ./backend/.env
     environment:
       DB_HOST: db
       DB_PORT: 5432
@@ -29,11 +31,29 @@ services:
       DB_USER: ${POSTGRES_USER:-wbuser}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-wbpassword}
       DATABASE_URL: "postgresql://${POSTGRES_USER:-wbuser}:${POSTGRES_PASSWORD:-wbpassword}@db:5432/${POSTGRES_DB:-wb_tracker}"
+      APP_BASE_URL: http://localhost
+      PASSWORD_RESET_EXPIRE_MINUTES: ${PASSWORD_RESET_EXPIRE_MINUTES:-30}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
+      SMTP_FROM: ${SMTP_FROM:-WB Tracker <noreply@localhost>}
+      SMTP_STARTTLS: "0"
     depends_on:
       db:
         condition: service_healthy
+      mailpit:
+        condition: service_started
     ports:
       - "8000:8000"
+
+  # Local SMTP sink: reset emails appear in the Mailpit web UI.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: wbtracker_mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
 
   frontend:
     build:

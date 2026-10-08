@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { apiUrl, getToken } from '../api.js'
+import { apiUrl, getToken, setToken } from '../api.js'
 
 export function useApi(url, deps = []) {
   const [data,    setData]    = useState(null)
@@ -15,7 +15,8 @@ export function useApi(url, deps = []) {
     const controller = new AbortController()
     let active = true
 
-    setLoading(true)
+    // Keep existing data rendered while background polling refreshes it.
+    if (data === null) setLoading(true)
     setError(null)
     fetch(apiUrl(url), {
       signal: controller.signal,
@@ -23,6 +24,8 @@ export function useApi(url, deps = []) {
     })
       .then(r => {
         if (r.status === 401) {
+          setToken(null)
+          localStorage.removeItem('wb-user')
           window.location.href = '/login'
           throw new Error('Unauthorized')
         }

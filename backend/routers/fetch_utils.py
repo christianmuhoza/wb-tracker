@@ -8,6 +8,29 @@ from db import get_app_settings_map, q
 log = logging.getLogger(__name__)
 
 
+def _borrower_names() -> set[str]:
+    rows = q(
+        """
+        SELECT DISTINCT LOWER(TRIM(borrower)) AS borrower
+        FROM procurement_notices
+        WHERE borrower IS NOT NULL AND TRIM(borrower) <> ''
+        """
+    )
+    return {row["borrower"] for row in rows if row.get("borrower")}
+
+
+def _pipeline_counts(bidder_result, alert_result, borrowers_before: set[str]) -> dict:
+    bidder_rows = (bidder_result or {}).get("countries", {}).values()
+    bidders_added = sum(int(row.get("bidders_inserted", 0) or 0) for row in bidder_rows)
+    alerts_added = int((alert_result or {}).get("created", 0) or 0)
+    borrowers_added = len(_borrower_names() - borrowers_before)
+    return {
+        "alerts_added": alerts_added,
+        "bidders_added": bidders_added,
+        "borrowers_added": borrowers_added,
+    }
+
+
 def run_full_fetch(payload: dict, job_id: int | None = None) -> dict:
     """Full fetch: all countries from baseline, then bidder import + award alerts."""
     import fetcher
@@ -17,6 +40,7 @@ def run_full_fetch(payload: dict, job_id: int | None = None) -> dict:
     since = _resolve_since(payload.get("since"))
     with_bidders = payload.get("with_bidders", True)
     report = _progress_reporter(job_id)
+    borrowers_before = _borrower_names()
 
     fetcher.init_db()
     conn = fetcher.get_connection()
@@ -56,13 +80,19 @@ def run_full_fetch(payload: dict, job_id: int | None = None) -> dict:
     except Exception as e:
         alert_result = {"status": "error", "error": str(e)}
 
+    counts = _pipeline_counts(bidder_result, alert_result, borrowers_before)
     return {
         "exit_code": 0 if success else 1,
         "stdout": f"Full fetch finished: {upserted} upserted, {new_records} new across {len(countries)} countries",
         "stderr": error_msg or "",
         "success": success,
+        "failed_countries": failed_countries,
         "bidder_import": bidder_result,
         "award_alerts": alert_result,
+        "run_counts": {
+            "notices_added": new_records,
+            **counts,
+        },
     }
 
 
@@ -72,6 +102,7 @@ def run_country_backfill(payload: dict, job_id: int | None = None) -> dict:
     since = _resolve_since(payload.get("since"))
     with_bidders = payload.get("with_bidders", True)
     report = _progress_reporter(job_id)
+    borrowers_before = _borrower_names()
 
     import fetcher
     from routers.awards import sync_award_alerts
@@ -107,13 +138,19 @@ def run_country_backfill(payload: dict, job_id: int | None = None) -> dict:
         except Exception as e:
             alert_result = {"status": "error", "error": str(e)}
 
+    counts = _pipeline_counts(bidder_result, alert_result, borrowers_before)
     return {
         "exit_code": 0 if success else 1,
         "stdout": f"{name} backfill finished from {since}: {upserted} fetched, {new_records} new, status={country_status}",
         "stderr": error_msg or "",
         "success": success,
+        "failed_countries": [name] if not success else [],
         "bidder_import": bidder_result,
         "award_alerts": alert_result,
+        "run_counts": {
+            "notices_added": new_records,
+            **counts,
+        },
     }
 
 

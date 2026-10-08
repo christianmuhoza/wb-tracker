@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { apiPost, setToken } from '../api.js';
 import { LogIn } from 'lucide-react';
 
@@ -98,6 +99,14 @@ export default function Login({ onLogin }) {
           <LogIn size={16} />
           {loading ? 'Signing in...' : 'Sign in'}
         </button>
+
+        <div style={{ textAlign: 'center', marginTop: 16 }}>
+          <Link to="/forgot-password" style={{
+            color: 'var(--text2)', fontSize: 13, textDecoration: 'none',
+          }}>
+            Forgot password?
+          </Link>
+        </div>
       </form>
     </div>
   );

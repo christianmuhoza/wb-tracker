@@ -16,6 +16,11 @@ export function getToken() {
   return _token;
 }
 
+function clearAuthentication() {
+  setToken(null);
+  localStorage.removeItem('wb-user');
+}
+
 function authHeaders() {
   const h = {};
   if (_token) h['Authorization'] = `Bearer ${_token}`;
@@ -34,8 +39,8 @@ export function apiUrl(path, params = {}) {
 
 export async function apiGet(path, params = {}) {
   const res = await fetch(apiUrl(path, params), { headers: authHeaders() });
-  if (res.status === 401) {
-    setToken(null);
+  if (res.status === 401 && path !== '/auth/login') {
+    clearAuthentication();
     window.location.href = '/login';
     throw new Error('Unauthorized');
   }
@@ -52,7 +57,7 @@ export async function apiPost(path, body = null, params = {}) {
   }
   const res = await fetch(apiUrl(path, params), opts);
   if (res.status === 401) {
-    setToken(null);
+    clearAuthentication();
     window.location.href = '/login';
     throw new Error('Unauthorized');
   }
@@ -68,7 +73,7 @@ export async function apiPut(path, body = null) {
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(apiUrl(path), opts);
   if (res.status === 401) {
-    setToken(null);
+    clearAuthentication();
     window.location.href = '/login';
     throw new Error('Unauthorized');
   }
@@ -82,7 +87,7 @@ export async function apiDelete(path) {
     headers: authHeaders(),
   });
   if (res.status === 401) {
-    setToken(null);
+    clearAuthentication();
     window.location.href = '/login';
     throw new Error('Unauthorized');
   }

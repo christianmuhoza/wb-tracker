@@ -45,6 +45,13 @@ def _clean_name(text: str) -> str:
         "price",
         "cost",
         "value",
+        "ltd",
+        "limited",
+        "inc",
+        "llc",
+        "plc",
+        "corp",
+        "corporation",
     }
     if text.lower() in NOISE_WORDS:
         return ""

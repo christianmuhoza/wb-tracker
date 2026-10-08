@@ -163,6 +163,7 @@ export default function AwardAlerts() {
     const params = new URLSearchParams()
     if (filter === 'unread') params.set('unread_only', 'true')
     if (filter === 'review') params.set('status', 'needs_review')
+    if (filter === 'software') params.set('software_only', 'true')
     const s = params.toString()
     return `/api/award-alerts/export${s ? `?${s}` : ''}`
   }, [filter])
@@ -173,6 +174,7 @@ export default function AwardAlerts() {
       const params = { page_size: '50' }
       if (filter === 'unread') params.unread_only = 'true'
       if (filter === 'review') params.status = 'needs_review'
+      if (filter === 'software') params.software_only = 'true'
       const data = await apiGet('/award-alerts', params)
       setAlerts(data.data || [])
       setMeta({ total: data.total || 0, unread: data.unread || 0 })
@@ -225,7 +227,7 @@ export default function AwardAlerts() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(150px, 1fr))', gap: 12, marginBottom: 18 }}>
         <div style={summaryBoxStyle}><div style={summaryLabelStyle}>Visible alerts</div><div style={{ fontSize: 24, fontWeight: 800 }}>{meta.total.toLocaleString()}</div></div>
         <div style={summaryBoxStyle}><div style={summaryLabelStyle}>Unread</div><div style={{ fontSize: 24, fontWeight: 800, color: 'var(--accent)' }}>{meta.unread.toLocaleString()}</div></div>
-        <div style={summaryBoxStyle}><div style={summaryLabelStyle}>Current filter</div><div style={{ fontSize: 18, fontWeight: 800 }}>{filter === 'review' ? 'Needs Review' : filter === 'unread' ? 'Unread' : 'All Active'}</div></div>
+        <div style={summaryBoxStyle}><div style={summaryLabelStyle}>Current filter</div>                <div style={{ fontSize: 18, fontWeight: 800 }}>{filter === 'review' ? 'Needs Review' : filter === 'unread' ? 'Unread' : filter === 'software' ? 'Software Opportunity Awards' : 'All Active'}</div></div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 18, flexWrap: 'wrap' }}>
@@ -233,6 +235,7 @@ export default function AwardAlerts() {
           ['all', 'All Active'],
           ['unread', 'Unread'],
           ['review', 'Needs Review'],
+          ['software', 'Software Opportunity Awards'],
         ].map(([key, label]) => (
           <button key={key} onClick={() => setFilter(key)} style={{ ...buttonStyle(false), background: filter === key ? 'var(--accent)' : 'var(--surface2)', borderColor: filter === key ? 'var(--accent)' : 'var(--border)', color: filter === key ? '#fff' : 'var(--text2)' }}>{label}</button>
         ))}

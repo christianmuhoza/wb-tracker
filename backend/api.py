@@ -27,8 +27,8 @@ import requests
 import unicodedata
 from bs4 import BeautifulSoup
 
-from auth import seed_admin_from_env
-from db import db, q, ensure_support_tables, get_app_settings_map
+from auth import router as auth_router, seed_admin_from_env
+from db import db, q, ensure_support_tables, get_app_settings_map, run_migrations
 from services.tech import build_tech_notice_condition, build_tech_bidder_condition, classify_notice_tech, looks_like_tech_bidder
 from services.contact_enrichment import search_company_contact
 from services.gemini_service import classify_and_enrich_with_gemini
@@ -47,8 +47,12 @@ app = FastAPI()
 
 @app.on_event("startup")
 def bootstrap_users():
-    """Keep the legacy `uvicorn api:app` development command bootstrapped."""
+    """Keep the legacy `uvicorn api:app` development command working."""
+    run_migrations()
     seed_admin_from_env()
+
+
+app.include_router(auth_router)
 
 # CORS
 app.add_middleware(

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Ban, CheckCircle, Clock3, RefreshCw, RotateCcw, Server, Timer } from 'lucide-react'
-import { apiPost } from '../api.js'
+import { AlertTriangle, Ban, CheckCircle, Clock3, RefreshCw, RotateCcw, Server, Timer, Trash2 } from 'lucide-react'
+import { apiDelete, apiPost } from '../api.js'
 import { useApi } from '../hooks/useApi.js'
 
 const STATUS_COLORS = {
@@ -29,6 +29,10 @@ export default function Operations() {
   const [selectedJob, setSelectedJob] = useState(null)
   const { data: summary, loading: summaryLoading } = useApi(`/api/operations/jobs/summary?t=${refreshKey}`, [refreshKey])
   const { data: jobs, loading: jobsLoading } = useApi(`/api/operations/jobs?t=${refreshKey}`, [refreshKey])
+  const { data: selectedJobDetails } = useApi(
+    selectedJob ? `/api/operations/jobs/${selectedJob.id}?t=${refreshKey}` : '',
+    [selectedJob?.id, refreshKey],
+  )
 
   useEffect(() => {
     const interval = window.setInterval(() => setRefreshKey(key => key + 1), 5000)
@@ -40,6 +44,10 @@ export default function Operations() {
     const refreshed = jobs.find(job => job.id === selectedJob.id)
     if (refreshed) setSelectedJob(refreshed)
   }, [jobs, selectedJob?.id])
+
+  useEffect(() => {
+    if (selectedJobDetails) setSelectedJob(selectedJobDetails)
+  }, [selectedJobDetails])
 
   const visibleJobs = useMemo(() => {
     if (!status) return jobs || []
@@ -54,10 +62,23 @@ export default function Operations() {
     } catch (error) {
       setMessage(`Could not ${action} job #${jobId}: ${error.message}`)
     }
+
+    const deleteOperation = async (jobId) => {
+      if (!window.confirm(`Delete job #${jobId} from Operations history?`)) return
+      try {
+        await apiDelete(`/operations/jobs/${jobId}`)
+        if (selectedJob?.id === jobId) setSelectedJob(null)
+        setMessage(`Job #${jobId} deleted.`)
+        setRefreshKey(key => key + 1)
+      } catch (error) {
+        setMessage(`Could not delete job #${jobId}: ${error.message}`)
+      }
+    }
   }
 
   const counts = summary?.counts || {}
   const progress = selectedJob?.progress_data || {}
+  const runCounts = progress.run_counts || {}
   const heartbeatAge = selectedJob?.heartbeat_at
     ? Math.max(0, Math.round((Date.now() - new Date(selectedJob.heartbeat_at).getTime()) / 1000))
     : null
@@ -118,8 +139,9 @@ export default function Operations() {
                   <td style={{ padding: '10px', color: 'var(--text3)', fontSize: 11 }}>{job.next_attempt_at || '--'}</td>
                   <td style={{ padding: '10px', color: '#ff9999', maxWidth: 260, fontSize: 11 }}>{job.error || '--'}</td>
                   <td style={{ padding: '10px', whiteSpace: 'nowrap' }}>
-                    {['failed', 'cancelled'].includes(job.status) && <button onClick={() => runAction(job.id, 'retry')} title="Retry" style={{ marginRight: 6, background: 'transparent', border: '1px solid var(--border)', color: 'var(--accent)', borderRadius: 6, padding: 6 }}><RotateCcw size={13} /></button>}
-                    {['queued', 'running'].includes(job.status) && <button onClick={() => runAction(job.id, 'cancel')} title="Cancel" style={{ background: 'transparent', border: '1px solid var(--border)', color: '#ff7777', borderRadius: 6, padding: 6 }}><Ban size={13} /></button>}
+                    {['failed', 'cancelled'].includes(job.status) && <button onClick={(event) => { event.stopPropagation(); runAction(job.id, 'retry') }} title="Retry" style={{ marginRight: 6, background: 'transparent', border: '1px solid var(--border)', color: 'var(--accent)', borderRadius: 6, padding: 6 }}><RotateCcw size={13} /></button>}
+                    {['queued', 'running'].includes(job.status) && <button onClick={(event) => { event.stopPropagation(); runAction(job.id, 'cancel') }} title="Stop operation" style={{ marginRight: 6, background: 'transparent', border: '1px solid var(--border)', color: '#ff7777', borderRadius: 6, padding: 6 }}><Ban size={13} /></button>}
+                    {['completed', 'failed', 'cancelled'].includes(job.status) && <button onClick={(event) => { event.stopPropagation(); deleteOperation(job.id) }} title="Delete from history" style={{ background: 'transparent', border: '1px solid var(--border)', color: '#ff7777', borderRadius: 6, padding: 6 }}><Trash2 size={13} /></button>}
                   </td>
                 </tr>
               ))}</tbody>
@@ -149,6 +171,26 @@ export default function Operations() {
               heartbeat {heartbeatAge === null ? '--' : `${heartbeatAge}s ago`}
             </span>
           </div>
+          {Object.keys(runCounts).length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <div style={{ color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--font-mono)', textTransform: 'uppercase', marginBottom: 9 }}>
+                This run {runCounts.estimated && <span style={{ color: '#f0a500' }}>(estimated from stored history)</span>}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+                {[
+                  ['Notices added', runCounts.notices_added],
+                  ['Alerts added', runCounts.alerts_added],
+                  ['Bidders added', runCounts.bidders_added],
+                  ['Borrowers added', runCounts.borrowers_added],
+                ].map(([label, value]) => (
+                  <div key={label} style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                    <div style={{ color: 'var(--text3)', fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase' }}>{label}</div>
+                    <div style={{ marginTop: 5, color: 'var(--text)', fontSize: 20, fontWeight: 700 }}>{value ?? 0}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

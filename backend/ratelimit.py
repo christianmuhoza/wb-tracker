@@ -35,6 +35,9 @@ class RateLimiter:
 DEFAULT_LIMITER = RateLimiter(max_requests=120, window_seconds=60)
 # Stricter limiter for expensive/mutating operations (enrichment, backfill).
 STRICT_LIMITER = RateLimiter(max_requests=20, window_seconds=60)
+# Auth endpoints need a tighter limit because they can trigger email and
+# password hashing work. The limiter is process-local, like the other limits.
+AUTH_LIMITER = RateLimiter(max_requests=10, window_seconds=300)
 
 
 def rate_limited(limiter=DEFAULT_LIMITER, key_func=None):
